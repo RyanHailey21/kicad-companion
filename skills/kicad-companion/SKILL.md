@@ -127,7 +127,40 @@ Or use the modular sub-tools:
 
 ---
 
-### 7. Project-Level Intelligence & Custom Scripts
+### 7. Automated Placement Overlap Detection & Relaxation Solving
+Never engage in repetitive manual trial-and-error coordinate guessing to resolve component overlaps or edge collisions. Use the automated placement engine:
+1. **Check Overlaps & Edge Violations:**
+   ```python
+   check_placement_overlaps(pcb_path="path/to/board.kicad_pcb", min_clearance_mm=0.25)
+   ```
+   *Computes exact footprint courtyard extents, verifies connector inset $\ge 2.0\text{ mm}$ from board edge, checks mounting hole clearance $\ge 2.5\text{ mm}$, and reports all pairwise overlapping bounding boxes.*
+2. **Automated Relaxation & Grid Snap:**
+   ```python
+   resolve_placement_overlaps(
+       pcb_path="path/to/board.kicad_pcb",
+       min_clearance_mm=0.5,
+       grid_step_mm=0.5,
+       fixed_refs=["J1", "H1", "H2", "H3", "H4", "DPD1", "LED1"],
+   )
+   ```
+   *Applies geometric relaxation along the minimum penetration axis to push overlapping components apart, clamps movable footprints within board margins, snaps final coordinates to a clean grid (0.5mm/1.0mm), and preserves critical fixed anchors.*
+
+---
+
+### 8. Automated Silkscreen Sanitization & Decluttering
+Dense layouts often suffer from 0402/0603 passive reference text clipping IC pads or overlapping adjacent components:
+```python
+sanitize_silkscreen(
+    pcb_path="path/to/board.kicad_pcb",
+    hide_passives=True,
+    min_pad_clearance_mm=0.50,
+)
+```
+*Automatically hides reference designators for small passives on `F.SilkS` (while preserving them on `F.Fab` for assembly), deduplicates overlaid text lines, and verifies $\ge 0.50\text{ mm}$ clearance from silkscreen to copper pads.*
+
+---
+
+### 9. Project-Level Intelligence & Custom Scripts
 Every project repository can contain a `.companion/` folder with custom rules:
 - Query project-specific stackup, target fab house, and preferred parts:
   ```python
@@ -140,7 +173,7 @@ Every project repository can contain a `.companion/` folder with custom rules:
 
 ---
 
-## 8. Overarching Hardware Standards (Mandatory for ALL Agents)
+## 10. Overarching Hardware Standards (Mandatory for ALL Agents)
 
 Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 8 design rules:
 
@@ -194,3 +227,15 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
 ### Rule 8: Stale Lockfile Detection & Reconnection Hygiene
 - KiCad creates lock files (`~<filename>.kicad_pcb.lck`, `~<filename>.kicad_sch.lck`) when opened in the GUI.
 - If an operation fails due to file locks or KiCad IPC drops, verify whether a live KiCad process owns the lock. Do not stomp or corrupt files; use `ensure_kicad_running` to manage the process lifecycle.
+
+### Rule 9: Real-Time Routing Observability & Streaming Logs
+- Never execute Freerouting or batch autorouters silently with buffered output.
+- All routing runs must stream output line-by-line in real-time (`bufsize=1`, unbuffered stdout) so progress, fanout passes, ripup costs, and unrouted net counts are observable while running.
+- In addition to stdout, every autoroute run must write a persistent log to `<dsn_path>.freerouting.log` for immediate inspection and diagnostic auditing.
+
+### Rule 10: Algorithmic Placement Overlap Resolution Over Manual Trial-and-Error
+- Agents must NOT engage in repetitive, manual coordinate guessing or tedious multi-step nudging to resolve component collisions, edge margins, or silkscreen clutter.
+- Always use the automated placement tools:
+  1. `check_placement_overlaps`: Automatically identify pairwise courtyard collisions, board edge violations, and mounting hole clearances.
+  2. `resolve_placement_overlaps`: Automatically apply geometric relaxation and grid snapping to separate overlapping components while preserving fixed connectors and sensors.
+  3. `sanitize_silkscreen`: Automatically declutter passive reference texts and guarantee $\ge 0.50\text{ mm}$ clearance to copper pads.
