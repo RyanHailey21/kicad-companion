@@ -117,35 +117,80 @@ def sync_pcb_nets_from_schematic(
         if setup_end != -1:
             pcb_content = pcb_content[:setup_end] + "\n" + net_decls + pcb_content[setup_end:]
 
-    # Assign nets to pads inside footprints
-    def update_footprint(m):
-        fp_text = m.group(0)
-        ref_m = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not ref_m:
-            return fp_text
-        ref = ref_m.group(1)
+    # Assign nets to pads inside footprints using robust paren-depth parsing
+    lines = pcb_content.splitlines(keepends=True)
+    out_lines = []
+    in_fp = False
+    fp_lines = []
+    fp_parens = 0
 
-        def update_pad(pm):
-            pad_text = pm.group(0)
-            pad_num = pm.group(1)
-            # Remove any existing (net ...)
-            pad_text = re.sub(r'\s*\(net\s+\d+\s+"[^"]*"\)', '', pad_text)
-            net_name = pin_to_net.get((ref, pad_num))
-            if net_name and net_name in net_to_code:
-                code = net_to_code[net_name]
-                net_expr = f'\n\t\t\t(net {code} "{net_name}")'
-                last_p = pad_text.rfind(')')
-                pad_text = pad_text[:last_p] + net_expr + pad_text[last_p:]
-            return pad_text
+    for line in lines:
+        if not in_fp:
+            if line.startswith("\t(footprint "):
+                in_fp = True
+                fp_lines = [line]
+                fp_parens = line.count("(") - line.count(")")
+            else:
+                out_lines.append(line)
+        else:
+            fp_lines.append(line)
+            fp_parens += line.count("(") - line.count(")")
+            if fp_parens <= 0:
+                in_fp = False
+                fp_text = "".join(fp_lines)
+                m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+                if not m_ref:
+                    out_lines.append(fp_text)
+                    continue
+                ref = m_ref.group(1)
 
-        return re.sub(
-            r'\(pad\s+"([^"]+)"\s+(?:smd|thru_hole|connect|np_thru_hole).*?\n\t\t\)',
-            update_pad,
-            fp_text,
-            flags=re.DOTALL,
-        )
+                fp_sublines = fp_text.splitlines(keepends=True)
+                new_fp_lines = []
+                in_pad = False
+                pad_lines = []
+                pad_parens = 0
 
-    pcb_content = re.sub(r'\(footprint\s+.*?\n\t\)', update_footprint, pcb_content, flags=re.DOTALL)
+                for sline in fp_sublines:
+                    if not in_pad:
+                        if "\t\t(pad " in sline:
+                            in_pad = True
+                            pad_lines = [sline]
+                            pad_parens = sline.count("(") - sline.count(")")
+                            if pad_parens <= 0:
+                                in_pad = False
+                                pad_text = sline
+                                m_pnum = re.search(r'\(pad\s+"([^"]+)"', pad_text)
+                                if m_pnum:
+                                    pnum = m_pnum.group(1)
+                                    pad_text = re.sub(r'\s*\(net\s+[^)]+\)', '', pad_text)
+                                    net_name = pin_to_net.get((ref, pnum))
+                                    if net_name and net_name in net_to_code:
+                                        code = net_to_code[net_name]
+                                        last_p = pad_text.rfind(')')
+                                        pad_text = pad_text[:last_p] + f' (net {code} "{net_name}")' + pad_text[last_p:]
+                                new_fp_lines.append(pad_text)
+                        else:
+                            new_fp_lines.append(sline)
+                    else:
+                        pad_lines.append(sline)
+                        pad_parens += sline.count("(") - sline.count(")")
+                        if pad_parens <= 0:
+                            in_pad = False
+                            pad_text = "".join(pad_lines)
+                            m_pnum = re.search(r'\(pad\s+"([^"]+)"', pad_text)
+                            if m_pnum:
+                                pnum = m_pnum.group(1)
+                                pad_text = re.sub(r'\n?\t*\(net\s+[^)]+\)', '', pad_text)
+                                net_name = pin_to_net.get((ref, pnum))
+                                if net_name and net_name in net_to_code:
+                                    code = net_to_code[net_name]
+                                    last_p = pad_text.rfind(')')
+                                    pad_text = pad_text[:last_p] + f'\n\t\t\t(net {code} "{net_name}")' + pad_text[last_p:]
+                            new_fp_lines.append(pad_text)
+
+                out_lines.append("".join(new_fp_lines))
+
+    pcb_content = "".join(out_lines)
     p_path.write_text(pcb_content, encoding="utf-8")
 
     # 4. Synchronize netclasses in .kicad_pro if present
