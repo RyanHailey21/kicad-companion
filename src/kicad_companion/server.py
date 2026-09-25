@@ -9,6 +9,8 @@ from .drc_triage import triage_pcb_drc as _triage_pcb_drc
 from .project_context import get_project_context as _get_project_context
 from .project_context import execute_project_script as _execute_project_script
 from .supervisor import ensure_kicad_running as _ensure_kicad_running
+from .macro_compiler import list_circuit_macros as _list_circuit_macros
+from .macro_compiler import compile_circuit_macro as _compile_circuit_macro
 
 server = MCPServer("kicad-companion")
 
@@ -99,6 +101,44 @@ def triage_pcb_drc(
     """
     res = _triage_pcb_drc(pcb_path=pcb_path, max_items_per_group=max_items_per_group)
     return res["summary_markdown"]
+
+
+@server.tool()
+def list_circuit_macros(
+    project_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """List available parametric circuit macros (voltage dividers, I2C pullups, LEDs, decoupling banks, USB-C, crystals).
+
+    Args:
+        project_path: Optional project directory to discover project-specific macros.
+    """
+    return _list_circuit_macros(project_path=project_path)
+
+
+@server.tool()
+def compile_circuit_macro(
+    macro_name: str,
+    params: Dict[str, Any],
+    anchor: List[float],
+    project_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compile a high-level circuit macro (DSL) into calculated components, grid coordinates, and Konnect batch recipes.
+
+    Calculates standard E24 component values, sets proper 1.27mm grid spacing, and outputs
+    ready-to-run Konnect batch commands.
+
+    Args:
+        macro_name: Name of macro ('voltage_divider', 'i2c_pullups', 'status_led', 'decoupling_bank', 'crystal_circuit', 'usb_c_pd_input').
+        params: Macro parameters (e.g. {'vin': 5.0, 'vout': 3.3, 'r_target_kohm': 10.0, 'package': '0603'}).
+        anchor: [x, y] coordinates in mm on the schematic where the subcircuit should be placed.
+        project_path: Optional project directory.
+    """
+    return _compile_circuit_macro(
+        macro_name=macro_name,
+        params=params,
+        anchor=anchor,
+        project_path=project_path,
+    )
 
 
 @server.tool()
