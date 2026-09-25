@@ -1,6 +1,6 @@
 ---
 name: kicad-companion
-description: "Universal KiCad 10 visual inspection, DRC triage, parametric circuit macro compiler, and project intelligence assistant. Use alongside Konnect to render 3D/2D views, triage DRC violations, compile circuit macros into batch recipes, inspect project .companion rules, and ensure KiCad is running before live IPC."
+description: "Universal KiCad 10 visual inspection, DRC triage, parametric circuit macro compiler, Specctra/Freerouting autorouting, net synchronization, and project intelligence assistant. Use alongside Konnect to render 3D/2D views, triage DRC violations, sync pad nets, autoroute boards headlessly, compile circuit macros into batch recipes, and supervise KiCad lifecycle."
 ---
 
 # KiCad Companion — Visual Feedback & Intelligence Workflow
@@ -9,8 +9,8 @@ This skill guides AI agents (Antigravity, Claude, Codex) on using the **`kicad-c
 
 ## Division of Labor
 
-- **Konnect MCP:** Handles all low-level atomic modifications (adding/moving footprints, net edits, routing, live NNG/Protobuf IPC).
-- **KiCad Companion MCP:** Handles perception, headless rendering, DRC intelligence, circuit macro compiling, process supervision, and project-local script execution.
+- **Konnect MCP:** Handles atomic live modifications (adding/moving footprints, manual net edits, interactive routing, live NNG/Protobuf IPC).
+- **KiCad Companion MCP:** Handles perception, headless rendering, DRC intelligence, circuit macro compiling, process supervision, headless netlist-to-PCB pad synchronization, and headless Specctra/Freerouting autorouting pipelines.
 
 ---
 
@@ -88,7 +88,46 @@ This categorizes all violations into:
 
 ---
 
-### 5. Project-Level Intelligence & Custom Scripts
+### 5. Headless Netlist Synchronization & Netclass Provisioning
+When initializing a PCB or updating from schematic changes, ensure all footprint pads have explicit nets assigned and project netclasses are configured:
+```python
+sync_pcb_nets(pcb_path="path/to/board.kicad_pcb")
+```
+What this performs:
+1. Executes `kicad-cli sch export netlist` from the project schematic.
+2. Parses net connections and updates every footprint pad with `(net <code> "<name>")`.
+3. Defines top-level `(net ...)` declarations in `.kicad_pcb`.
+4. Configures standard design rules and netclasses in `.kicad_pro`:
+   - `Default`: 0.25mm track, 0.20mm clearance.
+   - `Power`: 0.50mm track, 0.30mm clearance (assigned to VCC, 3V3, 5V, GND, PWR rails).
+   - `Analog_Sensitive`: 0.30mm track, 0.25mm clearance (for high-impedance/sensor nodes).
+   - `Digital_Events`: 0.25mm track, 0.20mm clearance (for fast digital pulses/clocks).
+
+---
+
+### 6. Specctra / Freerouting Headless Autorouting Pipeline
+For dense boards requiring autorouting:
+```python
+# Complete end-to-end pipeline:
+autoroute_board(pcb_path="path/to/board.kicad_pcb", passes=15)
+```
+Or use the modular sub-tools:
+1. **Export Specctra DSN:**
+   ```python
+   export_specctra_dsn(pcb_path="path/to/board.kicad_pcb")
+   ```
+   *Uses KiCad's bundled `pcbnew.ExportSpecctraDSN` with automatic non-ASCII / Greek glyph sanitization.*
+2. **Run Freerouting (Single-Threaded Mandatory):**
+   *Runs Freerouting JAR headlessly with `-mt 1` (avoids multi-threading clearance optimizer bugs).*
+3. **Import Specctra SES:**
+   ```python
+   import_specctra_ses(pcb_path="path/to/board.kicad_pcb", ses_path="path/to/board.ses")
+   ```
+   *Pure-Python S-expression parser that injects wire segments and vias directly into `.kicad_pcb` without wxWidgets GUI event-loop deadlocks.*
+
+---
+
+### 7. Project-Level Intelligence & Custom Scripts
 Every project repository can contain a `.companion/` folder with custom rules:
 - Query project-specific stackup, target fab house, and preferred parts:
   ```python
@@ -101,9 +140,9 @@ Every project repository can contain a `.companion/` folder with custom rules:
 
 ---
 
-## 6. Overarching Hardware Standards (Mandatory for ALL Agents)
+## 8. Overarching Hardware Standards (Mandatory for ALL Agents)
 
-Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 5 design rules:
+Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 8 design rules:
 
 ### Rule 1: Strict Footprint Provenance (Zero Synthetic Footprints)
 - **NEVER** synthesize or invent custom `.kicad_mod` footprint pad geometries from scratch.
@@ -140,3 +179,18 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
   3. `render_schematic(sch_path=...)`
   4. `triage_pcb_drc(pcb_path=...)`
 - Visually inspect component body boundaries, silkscreen readability, and connector pin margins against the physical board edges before concluding.
+
+### Rule 6: Silkscreen Clearance & Typography Constraints
+- **Silkscreen-to-Pad Clearance:** All graphic lines, polygons, keep-out boundaries, and text on `F.SilkS` or `B.SilkS` must maintain at least **0.50 mm (20 mils) clearance** from any exposed SMD or through-hole copper pad.
+- **DRC Zero Silk-Over-Copper:** Silkscreen crossing exposed copper (`silk_over_copper`) compromises solderability and causes fab defects; it is a critical gate failure.
+- **Minimum Text Sizing:** Silkscreen text height must be $\ge 0.80\text{ mm}$ (thickness $\ge 0.15\text{ mm}$) to satisfy KiCad DRC and fabrication legibility rules.
+
+### Rule 7: Freerouting / Specctra Autorouting Protocol
+- **Single-Thread Optimization Mandatory (`-mt 1`):** Freerouting v2.4+ has a known multi-threaded route optimizer bug that introduces trace-to-trace clearance violations. Always execute Freerouting with `-mt 1`.
+- **Pre-Routing Gate:** Routing must never be attempted unless `score_placement` passes with 100/100 and pad nets/netclasses are synchronized.
+- **Native Headless SES Import:** Do not invoke C++ wxWidgets SES imports in headless Python scripts to avoid UI event-loop deadlocks. Use `kicad-companion:import_specctra_ses`.
+- **Post-Route DRC Gate:** After SES import, fill ground zones (`refill_zones`) and run `triage_pcb_drc`. The board is not done until unrouted net count is 0 and copper clearances are 0.
+
+### Rule 8: Stale Lockfile Detection & Reconnection Hygiene
+- KiCad creates lock files (`~<filename>.kicad_pcb.lck`, `~<filename>.kicad_sch.lck`) when opened in the GUI.
+- If an operation fails due to file locks or KiCad IPC drops, verify whether a live KiCad process owns the lock. Do not stomp or corrupt files; use `ensure_kicad_running` to manage the process lifecycle.
