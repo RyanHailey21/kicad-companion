@@ -162,7 +162,7 @@ def sync_pcb_nets_from_schematic(
                                 m_pnum = re.search(r'\(pad\s+"([^"]+)"', pad_text)
                                 if m_pnum:
                                     pnum = m_pnum.group(1)
-                                    pad_text = re.sub(r'\s*\(net\s+[^)]+\)', '', pad_text)
+                                    pad_text = re.sub(r'\s*\(net\s+(?:\d+\s+)?"[^"]*"\)|\s*\(net\s+\d+\)', '', pad_text)
                                     net_name = pin_to_net.get((ref, pnum))
                                     if net_name and net_name in net_to_code:
                                         code = net_to_code[net_name]
@@ -180,7 +180,7 @@ def sync_pcb_nets_from_schematic(
                             m_pnum = re.search(r'\(pad\s+"([^"]+)"', pad_text)
                             if m_pnum:
                                 pnum = m_pnum.group(1)
-                                pad_text = re.sub(r'\n?\t*\(net\s+[^)]+\)', '', pad_text)
+                                pad_text = re.sub(r'\s*\(net\s+(?:\d+\s+)?"[^"]*"\)|\s*\(net\s+\d+\)', '', pad_text)
                                 net_name = pin_to_net.get((ref, pnum))
                                 if net_name and net_name in net_to_code:
                                     code = net_to_code[net_name]
