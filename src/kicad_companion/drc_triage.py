@@ -81,9 +81,18 @@ def triage_pcb_drc(
             ],
         }
 
-        if severity == "error" or any(k in v_type for k in ["short", "clearance", "copper"]):
+        if severity == "error" and "silk" not in v_type:
             critical_errors.append(entry)
-        elif any(k in v_type for k in ["silkscreen", "text", "courtyard"]):
+        elif any(k in v_type for k in ["short", "copper_edge_clearance", "hole_clearance"]) or (
+            "clearance" in v_type and "silk" not in v_type
+        ):
+            critical_errors.append(entry)
+        elif "silk" in v_type:
+            if "silk_over_copper" in v_type:
+                fab_hazards.append(entry)
+            else:
+                cosmetics.append(entry)
+        elif any(k in v_type for k in ["text", "courtyard"]):
             cosmetics.append(entry)
         elif "lib" in v_type:
             library_mismatches.append(entry)
