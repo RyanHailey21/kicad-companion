@@ -396,79 +396,94 @@ def build_pcb_with_real_footprints(pcb_path: Path):
 def get_real_pcb_placements():
     fps = []
 
-    # Photodiodes (2x2 cluster)
-    fps.append({"ref": "DPD1", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 22.25, "y": 15.25, "rot": 0})
-    fps.append({"ref": "DPD2", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 27.75, "y": 15.25, "rot": 0})
-    fps.append({"ref": "DPD3", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 22.25, "y": 20.75, "rot": 0})
-    fps.append({"ref": "DPD4", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 27.75, "y": 20.75, "rot": 0})
+    # 1. TOP POWER & REFERENCE (Y = 4.0 to 6.5 mm)
+    # Clearance from M3 holes at (3.5, 3.5) and (46.5, 3.5): keep X between 9.0 and 41.0 mm
+    fps.append({"ref": "C_BULK_D", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 9.5, "y": 4.5, "rot": 0})
+    fps.append({"ref": "FB1", "val": "BLM18AG601SN1D", "lib": "Inductor_SMD", "mod": "L_0603_1608Metric", "x": 13.5, "y": 4.5, "rot": 0})
+    fps.append({"ref": "C_BULK_A", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 17.5, "y": 4.5, "rot": 0})
+    fps.append({"ref": "U_REF", "val": "REF3312", "lib": "Package_TO_SOT_SMD", "mod": "SOT-23-3", "x": 23.0, "y": 4.5, "rot": 0})
+    fps.append({"ref": "CREF1", "val": "1uF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 27.5, "y": 4.5, "rot": 0})
+    fps.append({"ref": "CREF2", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 30.5, "y": 4.5, "rot": 0})
 
-    # TSAL6200 Emitter
-    fps.append({"ref": "LED1", "val": "TSAL6200", "lib": "LED_THT", "mod": "LED_D5.0mm", "x": 25.0, "y": 30.5, "rot": 90})
-    fps.append({"ref": "RLED", "val": "82R", "lib": "Resistor_SMD", "mod": "R_1206_3216Metric", "x": 20.0, "y": 30.5, "rot": 90})
-    fps.append({"ref": "Q1", "val": "AO3400A", "lib": "Package_TO_SOT_SMD", "mod": "SOT-23", "x": 30.0, "y": 30.5, "rot": 0})
-    fps.append({"ref": "RG", "val": "100R", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 34.0, "y": 30.5, "rot": 0})
-    fps.append({"ref": "RPD", "val": "100k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 34.0, "y": 33.0, "rot": 0})
-    fps.append({"ref": "C_LED", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 15.0, "y": 30.5, "rot": 90})
+    # Threshold dividers (Right side of top row, well clear of M3 hole at 46.5)
+    fps.append({"ref": "RTHP_A", "val": "499k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 35.0, "y": 3.5, "rot": 0})
+    fps.append({"ref": "RTHP_B", "val": "10.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 38.5, "y": 3.5, "rot": 0})
+    fps.append({"ref": "RTHN_B", "val": "10.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 35.0, "y": 6.0, "rot": 0})
+    fps.append({"ref": "RTHN_A", "val": "301k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 38.5, "y": 6.0, "rot": 0})
 
-    # TIAs (OPA381 AIDGKR -> MSOP-8)
-    fps.append({"ref": "U_TIA1", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 14.0, "y": 15.25, "rot": 0})
-    fps.append({"ref": "RF1", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 14.0, "y": 11.5, "rot": 0})
-    fps.append({"ref": "CF1", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 14.0, "y": 9.5, "rot": 0})
-    fps.append({"ref": "C_DEC_TIA1", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 10.0, "y": 15.25, "rot": 90})
+    # 2. PHOTODIODE CLUSTER (Y = 13.5 and 22.5 mm, rot: 90 for zero courtyard collision)
+    # W=4.5mm, H=8.0mm when rotated 90
+    fps.append({"ref": "DPD1", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 22.25, "y": 13.5, "rot": 90})
+    fps.append({"ref": "DPD2", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 27.75, "y": 13.5, "rot": 90})
+    fps.append({"ref": "DPD3", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 22.25, "y": 22.5, "rot": 90})
+    fps.append({"ref": "DPD4", "val": "VBPW34FASR", "lib": "OptoDevice", "mod": "Osram_BPW34S-SMD", "x": 27.75, "y": 22.5, "rot": 90})
 
-    fps.append({"ref": "U_TIA2", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 36.0, "y": 15.25, "rot": 180})
-    fps.append({"ref": "RF2", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 36.0, "y": 11.5, "rot": 0})
-    fps.append({"ref": "CF2", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 36.0, "y": 9.5, "rot": 0})
-    fps.append({"ref": "C_DEC_TIA2", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 40.0, "y": 15.25, "rot": 90})
+    # 3. TIAs (OPA381 MSOP-8) placed symmetrically outside M2 lens holder holes (15, 18) and (35, 18)
+    # Left TIAs: X = 7.5 mm (well clear of M3 hole at 3.5, 3.5 and M2 hole at 15.0, 18.0)
+    fps.append({"ref": "U_TIA1", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 7.5, "y": 14.0, "rot": 0})
+    fps.append({"ref": "RF1", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 7.5, "y": 10.5, "rot": 0})
+    fps.append({"ref": "CF1", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 7.5, "y": 8.5, "rot": 0})
+    fps.append({"ref": "C_DEC_TIA1", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 3.0, "y": 14.0, "rot": 90})
 
-    fps.append({"ref": "U_TIA3", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 14.0, "y": 20.75, "rot": 0})
-    fps.append({"ref": "RF3", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 14.0, "y": 24.5, "rot": 0})
-    fps.append({"ref": "CF3", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 14.0, "y": 26.5, "rot": 0})
-    fps.append({"ref": "C_DEC_TIA3", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 10.0, "y": 20.75, "rot": 90})
+    fps.append({"ref": "U_TIA3", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 7.5, "y": 23.0, "rot": 0})
+    fps.append({"ref": "RF3", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 7.5, "y": 19.5, "rot": 0})
+    fps.append({"ref": "CF3", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 7.5, "y": 17.5, "rot": 0})
+    fps.append({"ref": "C_DEC_TIA3", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 3.0, "y": 23.0, "rot": 90})
 
-    fps.append({"ref": "U_TIA4", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 36.0, "y": 20.75, "rot": 180})
-    fps.append({"ref": "RF4", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 36.0, "y": 24.5, "rot": 0})
-    fps.append({"ref": "CF4", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 36.0, "y": 26.5, "rot": 0})
-    fps.append({"ref": "C_DEC_TIA4", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 40.0, "y": 20.75, "rot": 90})
+    # Right TIAs: X = 42.5 mm (well clear of M3 hole at 46.5, 3.5 and M2 hole at 35.0, 18.0)
+    fps.append({"ref": "U_TIA2", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 42.5, "y": 14.0, "rot": 180})
+    fps.append({"ref": "RF2", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 42.5, "y": 10.5, "rot": 0})
+    fps.append({"ref": "CF2", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 42.5, "y": 8.5, "rot": 0})
+    fps.append({"ref": "C_DEC_TIA2", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 47.0, "y": 14.0, "rot": 90})
 
-    # Power & Reference
-    fps.append({"ref": "FB1", "val": "BLM18AG601SN1D", "lib": "Inductor_SMD", "mod": "L_0603_1608Metric", "x": 15.0, "y": 5.0, "rot": 0})
-    fps.append({"ref": "C_BULK_D", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 10.0, "y": 5.0, "rot": 0})
-    fps.append({"ref": "C_BULK_A", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 20.0, "y": 5.0, "rot": 0})
-    fps.append({"ref": "U_REF", "val": "REF3312", "lib": "Package_TO_SOT_SMD", "mod": "SOT-23-3", "x": 27.0, "y": 5.0, "rot": 0})
-    fps.append({"ref": "CREF1", "val": "1uF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 32.0, "y": 5.0, "rot": 0})
-    fps.append({"ref": "CREF2", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 35.0, "y": 5.0, "rot": 0})
+    fps.append({"ref": "U_TIA4", "val": "OPA381", "lib": "Package_SO", "mod": "MSOP-8_3x3mm_P0.65mm", "x": 42.5, "y": 23.0, "rot": 180})
+    fps.append({"ref": "RF4", "val": "18.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 42.5, "y": 19.5, "rot": 0})
+    fps.append({"ref": "CF4", "val": "47pF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 42.5, "y": 17.5, "rot": 0})
+    fps.append({"ref": "C_DEC_TIA4", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": 47.0, "y": 23.0, "rot": 90})
 
-    # Thresholds
-    fps.append({"ref": "RTHP_A", "val": "499k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 40.0, "y": 4.0, "rot": 0})
-    fps.append({"ref": "RTHP_B", "val": "10.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 44.0, "y": 4.0, "rot": 0})
-    fps.append({"ref": "RTHN_B", "val": "10.0k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 40.0, "y": 6.5, "rot": 0})
-    fps.append({"ref": "RTHN_A", "val": "301k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 44.0, "y": 6.5, "rot": 0})
+    # 4. EMITTER (TSAL6200 + AO3400A + RLED) at Y = 32.0 mm
+    fps.append({"ref": "LED1", "val": "TSAL6200", "lib": "LED_THT", "mod": "LED_D5.0mm", "x": 25.0, "y": 32.0, "rot": 0})
+    fps.append({"ref": "RLED", "val": "82R", "lib": "Resistor_SMD", "mod": "R_1206_3216Metric", "x": 18.5, "y": 32.0, "rot": 90})
+    fps.append({"ref": "C_LED", "val": "10uF", "lib": "Capacitor_SMD", "mod": "C_0805_2012Metric", "x": 14.0, "y": 32.0, "rot": 90})
+    fps.append({"ref": "Q1", "val": "AO3400A", "lib": "Package_TO_SOT_SMD", "mod": "SOT-23", "x": 31.5, "y": 32.0, "rot": 0})
+    fps.append({"ref": "RG", "val": "100R", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 36.5, "y": 31.0, "rot": 0})
+    fps.append({"ref": "RPD", "val": "100k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": 36.5, "y": 33.5, "rot": 0})
 
-    # Adaptation & Comparators (TLV3202 -> SOIC-8)
-    for idx, (name, num) in enumerate([("TL", 1), ("TR", 2), ("BL", 3), ("BR", 4)]):
-        x_col = 8.0 + (idx * 11.5)
-        fps.append({"ref": f"CA{num}", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": x_col, "y": 37.0, "rot": 90})
-        fps.append({"ref": f"RA{num}", "val": "22k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": x_col + 3.0, "y": 37.0, "rot": 90})
-        fps.append({"ref": f"U_CMP{num}", "val": "TLV3202", "lib": "Package_SO", "mod": "SOIC-8_3.9x4.9mm_P1.27mm", "x": x_col + 1.5, "y": 44.0, "rot": 0})
-        fps.append({"ref": f"C_DEC_CMP{num}", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": x_col + 1.5, "y": 48.0, "rot": 0})
+    # 5. ADAPTATION & COMPARATORS (TLV3202 SOIC-8)
+    # 4 columns: X = 7.5, 19.0, 31.0, 42.5 mm
+    cols = [("TL", 1, 7.5), ("TR", 2, 19.0), ("BL", 3, 31.0), ("BR", 4, 42.5)]
+    for name, num, xc in cols:
+        fps.append({"ref": f"CA{num}", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": xc, "y": 38.0, "rot": 0})
+        fps.append({"ref": f"RA{num}", "val": "22k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": xc, "y": 40.5, "rot": 0})
+        fps.append({"ref": f"U_CMP{num}", "val": "TLV3202", "lib": "Package_SO", "mod": "SOIC-8_3.9x4.9mm_P1.27mm", "x": xc, "y": 45.5, "rot": 0})
+        fps.append({"ref": f"C_DEC_CMP{num}", "val": "100nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": xc, "y": 49.5, "rot": 0})
 
-    # One-Shots (74LVC1G123 -> VSSOP-8)
-    events = [
-        ("ON_TL", 6.5, 53.0), ("OFF_TL", 6.5, 57.5),
-        ("ON_TR", 18.0, 53.0), ("OFF_TR", 18.0, 57.5),
-        ("ON_BL", 29.5, 53.0), ("OFF_BL", 29.5, 57.5),
-        ("ON_BR", 41.0, 53.0), ("OFF_BR", 41.0, 57.5),
-    ]
-    for ev, ox, oy in events:
-        fps.append({"ref": f"U_OS_{ev}", "val": "74LVC1G123", "lib": "Package_SO", "mod": "VSSOP-8_2.3x2mm_P0.5mm", "x": ox, "y": oy, "rot": 0})
-        fps.append({"ref": f"ROS_{ev}", "val": "8.2k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": ox + 3.0, "y": oy - 1.0, "rot": 0})
-        fps.append({"ref": f"COS_{ev}", "val": "12nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": ox + 3.0, "y": oy + 1.0, "rot": 0})
-        fps.append({"ref": f"ROUT_{ev}", "val": "150R", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": ox, "y": oy + 3.0, "rot": 90})
+    # 6. ONE-SHOTS & TIMING PASSIVES (74LVC1G123 VSSOP-8)
+    # Row 1: ON one-shots at Y = 53.0 mm
+    # Row 2: OFF one-shots at Y = 57.5 mm
+    for name, num, xc in cols:
+        # ON one-shot
+        fps.append({"ref": f"U_OS_ON_{name}", "val": "74LVC1G123", "lib": "Package_SO", "mod": "VSSOP-8_2.3x2mm_P0.5mm", "x": xc, "y": 53.0, "rot": 0})
+        fps.append({"ref": f"ROS_ON_{name}", "val": "8.2k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": xc - 3.4, "y": 53.0, "rot": 90})
+        fps.append({"ref": f"COS_ON_{name}", "val": "12nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": xc + 3.4, "y": 53.0, "rot": 90})
+        fps.append({"ref": f"ROUT_ON_{name}", "val": "150R", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": xc, "y": 55.2, "rot": 0})
 
-    # Connectors
-    fps.append({"ref": "J_FPGA", "val": "Tang_Nano_Event_Out", "lib": "Connector_PinHeader_2.54mm", "mod": "PinHeader_2x05_P2.54mm_Vertical", "x": 18.0, "y": 64.0, "rot": 0})
-    fps.append({"ref": "J_DEBUG", "val": "Analog_Debug", "lib": "Connector_PinHeader_2.54mm", "mod": "PinHeader_1x06_P2.54mm_Vertical", "x": 37.0, "y": 64.0, "rot": 0})
+        # OFF one-shot
+        fps.append({"ref": f"U_OS_OFF_{name}", "val": "74LVC1G123", "lib": "Package_SO", "mod": "VSSOP-8_2.3x2mm_P0.5mm", "x": xc, "y": 57.5, "rot": 0})
+        fps.append({"ref": f"ROS_OFF_{name}", "val": "8.2k", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": xc - 3.4, "y": 57.5, "rot": 90})
+        fps.append({"ref": f"COS_OFF_{name}", "val": "12nF", "lib": "Capacitor_SMD", "mod": "C_0603_1608Metric", "x": xc + 3.4, "y": 57.5, "rot": 90})
+        fps.append({"ref": f"ROUT_OFF_{name}", "val": "150R", "lib": "Resistor_SMD", "mod": "R_0603_1608Metric", "x": xc, "y": 59.8, "rot": 0})
+
+    # 7. CONNECTORS AT BOTTOM: 100% INSIDE OUTLINE & ZERO OVERLAPS
+    # J_FPGA (2x5 horizontal, rot: 90) at X = 12.0, Y = 65.5
+    # Bounding box in X: [10.23, 23.93] mm (clear of left M3 hole which ends at 6.7 mm)
+    # Bounding box in Y: [63.73, 67.27] mm (clear of bottom edge 70.0 mm and ROUT_OFF at 59.8 mm)
+    fps.append({"ref": "J_FPGA", "val": "Tang_Nano_Event_Out", "lib": "Connector_PinHeader_2.54mm", "mod": "PinHeader_2x05_P2.54mm_Vertical", "x": 12.0, "y": 65.5, "rot": 90})
+
+    # J_DEBUG (1x6 horizontal, rot: 90) at X = 26.5, Y = 65.5
+    # Bounding box in X: [24.73, 40.97] mm (clear of J_FPGA at 23.93 mm and right M3 hole at 43.3 mm)
+    # Bounding box in Y: [63.73, 67.27] mm (clear of bottom edge 70.0 mm)
+    fps.append({"ref": "J_DEBUG", "val": "Analog_Debug", "lib": "Connector_PinHeader_2.54mm", "mod": "PinHeader_1x06_P2.54mm_Vertical", "x": 26.5, "y": 65.5, "rot": 90})
 
     return fps
 
