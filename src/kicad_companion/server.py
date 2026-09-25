@@ -18,6 +18,11 @@ from .router import (
     import_specctra_ses as _import_specctra_ses,
     run_freerouting as _run_freerouting,
 )
+from .placement import (
+    check_placement_overlaps as _check_placement_overlaps,
+    resolve_placement_overlaps as _resolve_placement_overlaps,
+    sanitize_silkscreen as _sanitize_silkscreen,
+)
 
 server = MCPServer("kicad-companion")
 
@@ -255,6 +260,69 @@ def import_specctra_ses(
         ses_path: Path to the Freerouting .ses file.
     """
     return _import_specctra_ses(pcb_path=pcb_path, ses_path=ses_path)
+
+
+@server.tool()
+def check_placement_overlaps(
+    pcb_path: str,
+    min_clearance_mm: float = 0.25,
+) -> Dict[str, Any]:
+    """Inspect PCB placement for component courtyard overlaps, board edge insets, and mounting hole clearances.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        min_clearance_mm: Minimum clearance required between component boundaries. Default 0.25 mm.
+    """
+    return _check_placement_overlaps(pcb_path=pcb_path, min_clearance_mm=min_clearance_mm)
+
+
+@server.tool()
+def resolve_placement_overlaps(
+    pcb_path: str,
+    min_clearance_mm: float = 0.5,
+    grid_step_mm: float = 0.5,
+    fixed_refs: Optional[List[str]] = None,
+    max_iterations: int = 50,
+) -> Dict[str, Any]:
+    """Iteratively separate overlapping footprints using geometric relaxation and grid snapping.
+
+    Automatically preserves fixed components (connectors J*, mounting holes H*, sensors DPD*/LED*)
+    while adjusting passives and snapping to grid.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        min_clearance_mm: Minimum clearance required between footprints. Default 0.5 mm.
+        grid_step_mm: Grid snap step for resolved positions. Default 0.5 mm.
+        fixed_refs: Optional list of component references that must not move.
+        max_iterations: Relaxation iterations. Default 50.
+    """
+    return _resolve_placement_overlaps(
+        pcb_path=pcb_path,
+        min_clearance_mm=min_clearance_mm,
+        grid_step_mm=grid_step_mm,
+        fixed_refs=fixed_refs,
+        max_iterations=max_iterations,
+    )
+
+
+@server.tool()
+def sanitize_silkscreen(
+    pcb_path: str,
+    hide_passives: bool = True,
+    min_pad_clearance_mm: float = 0.50,
+) -> Dict[str, Any]:
+    """Automatically declutter silkscreen, hide small 0402/0603/0805 passives, and ensure minimum pad clearance.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        hide_passives: Set (hide yes) on small passive reference designators on F.SilkS. Default True.
+        min_pad_clearance_mm: Minimum clearance from silkscreen to copper pads. Default 0.50 mm.
+    """
+    return _sanitize_silkscreen(
+        pcb_path=pcb_path,
+        hide_passives=hide_passives,
+        min_pad_clearance_mm=min_pad_clearance_mm,
+    )
 
 
 def main():

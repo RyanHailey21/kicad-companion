@@ -121,10 +121,30 @@ def run_freerouting(
     if single_threaded:
         cmd.extend(["-mt", "1"])
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if not ses_path.is_file():
-        err_msg = proc.stderr.strip() or proc.stdout.strip() or "Freerouting exited without producing SES"
-        raise RuntimeError(f"Freerouting failed: {err_msg}")
+    log_path = d_path.with_name(f"{d_path.stem}.freerouting.log")
+    print(f"Executing Freerouting: {' '.join(cmd)}")
+    print(f"Streaming live progress to console and {log_path} ...", flush=True)
+
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        for line in proc.stdout:
+            print(f"[Freerouting] {line.strip()}", flush=True)
+            log_file.write(line)
+            log_file.flush()
+        proc.wait()
+
+    if not ses_path.is_file() or proc.returncode != 0:
+        tail_lines = ""
+        if log_path.is_file():
+            tail_lines = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-15:])
+        err_msg = tail_lines or "Freerouting exited without producing SES"
+        raise RuntimeError(f"Freerouting failed (code {proc.returncode}):\n{err_msg}")
 
     return str(ses_path)
 
