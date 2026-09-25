@@ -167,9 +167,9 @@ def sync_pcb_nets_from_schematic(
                 {
                     "name": "Power",
                     "clearance": 0.15,
-                    "track_width": 0.40,
-                    "via_diameter": 0.8,
-                    "via_drill": 0.4,
+                    "track_width": 0.30,
+                    "via_diameter": 0.6,
+                    "via_drill": 0.3,
                     "priority": 1,
                 },
                 {
@@ -196,6 +196,8 @@ def sync_pcb_nets_from_schematic(
                 else:
                     classes[dc["name"]]["clearance"] = dc["clearance"]
                     classes[dc["name"]]["track_width"] = dc["track_width"]
+                    classes[dc["name"]]["via_diameter"] = dc["via_diameter"]
+                    classes[dc["name"]]["via_drill"] = dc["via_drill"]
 
             patterns = net_settings.get("netclass_patterns", [])
             existing_patterns = {(p.get("netclass"), p.get("pattern")) for p in patterns}

@@ -170,21 +170,29 @@ def import_specctra_ses(
     # Y is negated relative to KiCad coordinates
     scale = 0.0001
 
-    # Extract all routed nets
-    net_blocks = re.findall(r'\(net\s+([^\s()]+)(.*?)(?=\n\s*\(net|\n\s*\)\s*\n\s*\))', ses_content, re.DOTALL)
+    # Extract all routed nets from network_out
+    idx = ses_content.find("(network_out")
+    if idx == -1:
+        net_chunks = []
+    else:
+        net_chunks = re.split(r"\n\s{4,8}\(net\s+", ses_content[idx:])
 
     track_lines = []
     via_lines = []
     routed_nets = set()
 
-    for net_name, body in net_blocks:
+    for chunk in net_chunks[1:]:
+        m_name = re.match(r'"?([^\s"]+)"?', chunk)
+        if not m_name:
+            continue
+        net_name = m_name.group(1)
         net_code = net_map.get(net_name, 0)
         routed_nets.add(net_name)
 
         # 1. Wires: (wire (path LAYER WIDTH X1 Y1 X2 Y2 ...))
-        wire_matches = re.findall(r'\(wire\s+\(path\s+(\S+)\s+(\d+)\s+([-\d\s]+?)\)\s*\)', body, re.DOTALL)
+        wire_matches = re.findall(r"\(wire\s+\(path\s+(\S+)\s+(\d+)\s+([-\d\s]+?)\)\s*\)", chunk, re.DOTALL)
         for layer, width_units, pts_str in wire_matches:
-            w_mm = float(width_units) * scale
+            w_mm = max(round(float(width_units) * scale, 4), 0.15)
             pts = [float(x) for x in pts_str.split()]
             coords = []
             for i in range(0, len(pts), 2):
@@ -201,7 +209,7 @@ def import_specctra_ses(
                 )
 
         # 2. Vias: (via "PADSTACK" X Y)
-        via_matches = re.findall(r'\(via\s+"([^"]+)"\s+([-\d.]+)\s+([-\d.]+)', body)
+        via_matches = re.findall(r'\(via\s+"([^"]+)"\s+([-\d.]+)\s+([-\d.]+)', chunk)
         for padstack, vx_str, vy_str in via_matches:
             vx_mm = round(float(vx_str) * scale, 4)
             vy_mm = round(-float(vy_str) * scale, 4)
