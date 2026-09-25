@@ -5,3 +5,12 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+*.json
+*.net
+*.dsn
+*.ses
+*.log
+*.bak
+/*.py
+!setup.py
+
