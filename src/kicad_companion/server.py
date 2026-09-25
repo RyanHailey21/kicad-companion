@@ -11,6 +11,13 @@ from .project_context import execute_project_script as _execute_project_script
 from .supervisor import ensure_kicad_running as _ensure_kicad_running
 from .macro_compiler import list_circuit_macros as _list_circuit_macros
 from .macro_compiler import compile_circuit_macro as _compile_circuit_macro
+from .net_sync import sync_pcb_nets_from_schematic as _sync_pcb_nets_from_schematic
+from .router import (
+    autoroute_board as _autoroute_board,
+    export_specctra_dsn as _export_specctra_dsn,
+    import_specctra_ses as _import_specctra_ses,
+    run_freerouting as _run_freerouting,
+)
 
 server = MCPServer("kicad-companion")
 
@@ -182,6 +189,72 @@ def ensure_kicad_running(
         project_or_pcb_path: Path to the .kicad_pro or .kicad_pcb file.
     """
     return _ensure_kicad_running(project_or_pcb_path=project_or_pcb_path)
+
+
+@server.tool()
+def sync_pcb_nets(
+    pcb_path: str,
+    sch_path: Optional[str] = None,
+    pro_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Synchronize schematic netlist into PCB pad net assignments and project netclasses.
+
+    Exports the netlist from the schematic headlessly via kicad-cli, updates every footprint
+    pad with explicit (net <code> "<name>") attributes, defines top-level board nets, and
+    configures standard design rules / netclasses (Power, Analog_Sensitive, Digital_Events, Default).
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        sch_path: Optional path to the .kicad_sch file.
+        pro_path: Optional path to the .kicad_pro file.
+    """
+    return _sync_pcb_nets_from_schematic(pcb_path=pcb_path, sch_path=sch_path, pro_path=pro_path)
+
+
+@server.tool()
+def export_specctra_dsn(
+    pcb_path: str,
+    output_dsn: Optional[str] = None,
+) -> str:
+    """Export a KiCad PCB to Specctra DSN format using KiCad's bundled pcbnew engine.
+
+    Sanitizes non-ASCII / Greek characters to ensure full compatibility with Freerouting.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        output_dsn: Optional output path for the .dsn file.
+    """
+    return _export_specctra_dsn(pcb_path=pcb_path, output_dsn=output_dsn)
+
+
+@server.tool()
+def autoroute_board(
+    pcb_path: str,
+    passes: int = 15,
+) -> Dict[str, Any]:
+    """Execute end-to-end headless autorouting with Freerouting: DSN export -> route -> SES import -> DRC triage.
+
+    Automatically uses single-threaded route optimization (-mt 1) to eliminate Freerouting clearance bugs.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        passes: Maximum autorouting passes. Default 15.
+    """
+    return _autoroute_board(pcb_path=pcb_path, passes=passes)
+
+
+@server.tool()
+def import_specctra_ses(
+    pcb_path: str,
+    ses_path: str,
+) -> Dict[str, Any]:
+    """Import a Freerouting Specctra SES file and inject routed tracks and vias into .kicad_pcb headlessly.
+
+    Args:
+        pcb_path: Path to target .kicad_pcb file.
+        ses_path: Path to the Freerouting .ses file.
+    """
+    return _import_specctra_ses(pcb_path=pcb_path, ses_path=ses_path)
 
 
 def main():
