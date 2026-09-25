@@ -219,9 +219,25 @@ def import_specctra_ses(
                 f'\t(via (at {vx_mm} {vy_mm}) (size {size_mm}) (drill {drill_mm}) (layers "F.Cu" "B.Cu") (net {net_code}) (uuid "{u}"))'
             )
 
-    # Remove existing tracks and vias from pcb_content
-    pcb_content = re.sub(r'\n\t\(segment\s+.*?\)', '', pcb_content)
-    pcb_content = re.sub(r'\n\t\(via\s+.*?\)', '', pcb_content)
+    # Remove existing tracks and vias from pcb_content using paren counting
+    lines = pcb_content.splitlines(keepends=True)
+    clean_lines = []
+    skip = False
+    parens = 0
+    for line in lines:
+        if not skip:
+            if line.startswith("\t(segment") or line.startswith("\t(via"):
+                skip = True
+                parens = line.count("(") - line.count(")")
+                if parens <= 0:
+                    skip = False
+            else:
+                clean_lines.append(line)
+        else:
+            parens += line.count("(") - line.count(")")
+            if parens <= 0:
+                skip = False
+    pcb_content = "".join(clean_lines)
 
     # Insert new tracks and vias before the final closing ')'
     elements = track_lines + via_lines
