@@ -1,0 +1,6 @@
+{
+  "passive_size": "0603",
+  "decoupling_cap_default": "100nF 50V X7R 0603",
+  "bulk_cap_default": "10uF 25V X5R 0805",
+  "led_resistor_default": "1k 0603"
+}

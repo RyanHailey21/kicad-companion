@@ -1,0 +1,18 @@
+[project]
+name = "kicad-companion"
+version = "0.1.0"
+description = "Universal KiCad 10 AI Companion: Headless Rendering, DRC Triage, and Project Intelligence"
+authors = [{ name = "Ryan", email = "ryanh@local" }]
+dependencies = [
+    "mcp>=2.0.0",
+    "pydantic>=2.0.0",
+]
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+kicad-companion = "kicad_companion.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

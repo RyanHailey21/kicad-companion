@@ -1,0 +1,9 @@
+{
+  "target_manufacturer": "JLCPCB",
+  "stackup": "JLC04161H-7628",
+  "layer_count": 4,
+  "min_trace_width_mm": 0.127,
+  "min_clearance_mm": 0.127,
+  "min_via_diameter_mm": 0.45,
+  "min_via_drill_mm": 0.3
+}
