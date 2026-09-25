@@ -98,3 +98,45 @@ Every project repository can contain a `.companion/` folder with custom rules:
   ```python
   execute_project_script(target_path="path/to/project_dir", script_name="calc_impedance.py")
   ```
+
+---
+
+## 6. Overarching Hardware Standards (Mandatory for ALL Agents)
+
+Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 5 design rules:
+
+### Rule 1: Strict Footprint Provenance (Zero Synthetic Footprints)
+- **NEVER** synthesize or invent custom `.kicad_mod` footprint pad geometries from scratch.
+- All footprints must be sourced directly from:
+  1. KiCad 10 official libraries (`C:\Users\ryanh\AppData\Local\Programs\KiCad\10.0\share\kicad\footprints\`).
+  2. Verified vendor downloads (UltraLibrarian, SnapEDA, official manufacturer package files).
+- If an official or vendor footprint cannot be found, the agent **MUST STOP and ask the user to provide the footprint**. Do not guess pad dimensions or spacing.
+
+### Rule 2: Physical Connector Extent & Zero Edge Overhang
+- Connectors (through-hole headers, shrouded headers, USB-C receptacles, barrel jacks) have physical bodies and pin arrays extending far beyond Pin 1 origin.
+- When placing connectors:
+  1. Calculate total bounding box ($X_{min}, X_{max}, Y_{min}, Y_{max}$) accounting for pin count, pitch, and orientation angle.
+  2. Ensure connector pins and bodies remain at least **2.0 mm inside the board outline (`Edge.Cuts`)**.
+  3. Ensure at least **2.5 mm clearance from all mounting hole screw heads**.
+
+### Rule 3: Mandatory Quantitative Placement Quality Gate (`score_placement`)
+- Do not guess coordinates or proceed directly from placement to routing.
+- After placing or moving components, call `konnect:score_placement`.
+- **Target Gate:** The layout must achieve:
+  - **Score:** `100 / 100`
+  - **Verdict:** `pass`
+  - **Hard Failures:** `[]` (Zero courtyard collisions)
+  - **Outside Outline:** `[]` (Zero components outside board outline)
+- Routing must not begin until placement achieves a 100% clean passing verdict.
+
+### Rule 4: Symbol Inheritance (`extends`) & Multi-Unit Completeness
+- In KiCad 10, library symbols frequently inherit from base models (`extends`). Embedded `(lib_symbols ...)` blocks in `.kicad_sch` must contain fully resolved graphical primitives and pins, otherwise KiCad displays empty bounding boxes with `??`.
+- Multi-unit symbols (e.g. ICs with separate logic gates and power units, dual comparators, dual monostables) must have **both logic units and power pin units explicitly instantiated**. Omitting power units triggers ERC `missing_unit` and `missing_power_pin`.
+
+### Rule 5: Mandatory Multi-Angle Visual Verification Before Completion
+- An agent must never report a board as complete without generating visual artifacts and reviewing them:
+  1. `render_pcb_3d(pcb_path=..., side="top")`
+  2. `render_pcb_3d(pcb_path=..., rotate="-45,0,45")` (Isometric)
+  3. `render_schematic(sch_path=...)`
+  4. `triage_pcb_drc(pcb_path=...)`
+- Visually inspect component body boundaries, silkscreen readability, and connector pin margins against the physical board edges before concluding.
