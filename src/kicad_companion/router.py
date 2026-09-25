@@ -190,7 +190,7 @@ def import_specctra_ses(
         routed_nets.add(net_name)
 
         # 1. Wires: (wire (path LAYER WIDTH X1 Y1 X2 Y2 ...))
-        wire_matches = re.findall(r"\(wire\s+\(path\s+(\S+)\s+(\d+)\s+([-\d\s]+?)\)\s*\)", chunk, re.DOTALL)
+        wire_matches = re.findall(r"\(wire\s+\(path\s+(\S+)\s+(\d+)\s+([-\d\s]+?)\)", chunk, re.DOTALL)
         for layer, width_units, pts_str in wire_matches:
             w_mm = max(round(float(width_units) * scale, 4), 0.15)
             pts = [float(x) for x in pts_str.split()]
