@@ -48,9 +48,8 @@ def render_pcb_3d(
         zoom=zoom,
         rotate=rotate,
     )
-    img = Image(path=res["file_path"])
     msg = f"Successfully rendered 3D {side} view to {res['file_path']} ({res['width']}x{res['height']})."
-    return [img, msg]
+    return msg
 
 
 @server.tool()
