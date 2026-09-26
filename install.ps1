@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = "C:\Users\ryanh\kicad-companion"
+$repoRoot = $PSScriptRoot
 $skillSource = Join-Path $repoRoot "skills\kicad-companion"
 
 Write-Host "=== Setting up KiCad Companion across all agents ===" -ForegroundColor Cyan
