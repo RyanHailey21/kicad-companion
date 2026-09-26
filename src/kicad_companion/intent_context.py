@@ -112,23 +112,54 @@ def ensure_project_context(
     if is_new or purpose or title:
         existing_text = context_file.read_text(encoding="utf-8") if context_file.is_file() else ""
         
-        proj_title = title or project_stem.replace("-", " ").title()
-        proj_purpose = purpose or "High-performance neuromorphic hardware circuit designed for low-power event sensing, autonomous signal conditioning, and rapid asynchronous spike generation."
-        
+        proj_title = title or project_stem.replace("-", " ").replace("_", " ").title()
+        proj_purpose = purpose or f"Hardware design and production implementation for {proj_title}."
+
+        # Determine dominant power rail for operating voltage estimate
+        v_est = "Unknown"
+        for r in power_rails:
+            if "3V3" in r or "3.3V" in r:
+                v_est = "3.3 VDC"
+                break
+            elif "5V" in r:
+                v_est = "5.0 VDC"
+                break
+            elif "12V" in r:
+                v_est = "12.0 VDC"
+                break
+            elif "1V8" in r or "1.8V" in r:
+                v_est = "1.8 VDC"
+                break
+
+        # Dynamically categorize discovered active components
+        detected_stages = []
+        if any(any(k in v.upper() for k in ["OPA", "AD8", "TL0", "LM358", "MCP6"]) for _, v in active_ics):
+            detected_stages.append("Analog Front-End / Signal Amplification (Precision Op-Amps)")
+        if any(any(k in v.upper() for k in ["CMP", "TLV3", "LM393", "ADCMP"]) for _, v in active_ics):
+            detected_stages.append("Threshold Detection & Fast Comparison")
+        if any(any(k in v.upper() for k in ["123", "74LVC", "74HC", "CD40"]) for _, v in active_ics):
+            detected_stages.append("Digital Logic / Pulse Timing / Monostable Conditioning")
+        if any(any(k in v.upper() for k in ["ESP32", "STM32", "RP2040", "ATMEGA", "NRF"]) for _, v in active_ics):
+            detected_stages.append("Microcontroller / Embedded Processing")
+        if any(any(k in v.upper() for k in ["LDO", "AP2112", "AMS1117", "TPS", "BUCK", "BOOST"]) for _, v in active_ics):
+            detected_stages.append("Power Management & Voltage Regulation")
+        if not detected_stages:
+            detected_stages = ["General Electronic Processing & Discrete Signal Conditioning"]
+
+        stages_md = "\n".join([f"  - {st}" for st in detected_stages])
+
         content = f"""# Project Context & Hardware Intent
 
 ## 1. Project Goal & Intent
 - **Project Name:** {proj_title}
 - **Primary Goal:** {proj_purpose}
-- **Target Application:** Embedded autonomous sensing, neuromorphic edge computing, and real-time event telemetry.
+- **Target Application:** High-reliability embedded electronics and hardware automation.
 
 ## 2. Electrical Specifications & Architecture
-- **Power Supply Rails:** {', '.join(power_rails) if power_rails else '3.3V (VCC), GND'}
-- **Estimated Operating Voltage:** 3.3 VDC
-- **Signal Architecture:**
-  - Front-End: Low-noise transimpedance amplifier (TIA) with photodiode sensor array.
-  - Signal Conditioning: Analog differentiators / threshold comparators for asynchronous event generation.
-  - Event Output: Monostable pulse generators driving digital interfaces / FPGA headers.
+- **Power Supply Rails:** {', '.join(power_rails) if power_rails else 'VCC, GND'}
+- **Estimated Operating Voltage:** {v_est}
+- **Subcircuit Architecture:**
+{stages_md}
 
 ## 3. Real Electronics Components & SPICE Model Verification
 | Reference | Component / Value | Role | SPICE Macromodel Status |

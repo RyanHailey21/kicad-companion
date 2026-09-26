@@ -107,15 +107,14 @@ def audit_spice_models(target_path: str) -> Dict[str, Any]:
             for cf in cir_files:
                 try:
                     ctext = cf.read_text(encoding="utf-8", errors="ignore")
-                    if re.search(rf'\.MODEL\s+.*{re.escape(val_clean)}', ctext, re.IGNORECASE) or re.search(rf'\.SUBCKT\s+.*{re.escape(val_clean)}', ctext, re.IGNORECASE):
-                        matched_model = f"Defined in {cf.name}"
-                        break
-                    # Special neuromorphic circuit behavioral models
-                    if ("123" in val_clean or "OS" in ref) and "MONOSTABLE" in ctext:
-                        matched_model = f"{cf.name} (MONOSTABLE_100US)"
-                        break
-                    if "3202" in val_clean and "TLV3202" in ctext:
-                        matched_model = f"{cf.name} (TLV3202_BEHAVIORAL)"
+                    sub_matches = re.findall(r'^\s*\.SUBCKT\s+([A-Za-z0-9_]+)', ctext, re.MULTILINE | re.IGNORECASE)
+                    model_matches = re.findall(r'^\s*\.MODEL\s+([A-Za-z0-9_]+)', ctext, re.MULTILINE | re.IGNORECASE)
+                    for ent in (sub_matches + model_matches):
+                        ent_clean = re.sub(r'[^A-Za-z0-9]', '', ent).lower()
+                        if val_clean in ent_clean or ent_clean in val_clean:
+                            matched_model = f"{cf.name} ({ent})"
+                            break
+                    if matched_model:
                         break
                 except Exception:
                     pass

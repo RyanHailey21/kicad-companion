@@ -116,34 +116,62 @@ def audit_component_pinouts(
                     "details": f"Designator '{ref}' ends in letters. KiCad GUI 'Update PCB from Schematic' (F8) will flag this as unannotated. Use sync_pcb_nets or append digits to avoid GUI sync errors.",
                 })
 
-    # 5. Check Floating / Unconnected Pads on PCB (ignoring known NC pins on MSOP-8/SOIC-8)
+    # Discover declared NC pins and multi-unit definitions from schematic
+    nc_pins_by_ref = {}
+    units_by_lib = {}
+    inst_units_by_ref = {}
+    lib_by_ref = {}
+
+    if has_sch:
+        lib_syms = re.findall(r'\(symbol\s+"([^"]+)"([\s\S]*?)(?=\n\t\t\(symbol\s+"|\n\t\))', sch_text)
+        for lib_name, lib_body in lib_syms:
+            # Detect NC pins
+            nc_nums = set()
+            for pm in re.finditer(r'\(pin\s+([^\s]+)\s+.*?\(name\s+"([^"]+)".*?\(number\s+"([^"]+)"', lib_body, re.DOTALL):
+                ptype, pname, pnum = pm.group(1), pm.group(2), pm.group(3)
+                if ptype == "no_connect" or pname.upper() in ["NC", "N.C.", "N/C", "NOT CONNECTED"]:
+                    nc_nums.add(pnum)
+            if nc_nums:
+                nc_pins_by_ref[lib_name] = nc_nums
+
+            # Detect multi-unit symbols (unit 0 represents common non-gated graphics)
+            unit_ids = set()
+            for um in re.finditer(r'\(symbol\s+"[^"]+_(\d+)_\d+"', lib_body):
+                uid = int(um.group(1))
+                if uid > 0:
+                    unit_ids.add(uid)
+            if len(unit_ids) > 1:
+                units_by_lib[lib_name] = unit_ids
+
+        # Map instances to lib_ids and units
+        for m in re.finditer(r'\(symbol\s+.*?\(lib_id\s+"([^"]+)".*?\(property\s+"Reference"\s+"([^"]+)".*?\(unit\s+(\d+)\)', sch_text, re.DOTALL):
+            lid, r, u = m.group(1), m.group(2), int(m.group(3))
+            lib_by_ref[r] = lid
+            inst_units_by_ref.setdefault(r, set()).add(u)
+
+    # 5. Check Floating / Unconnected Pads on PCB (respecting schematic NC pins)
     for ref, data in pcb_footprints.items():
-        if ref == "H":  # Skip mounting holes
+        if any(ref.upper().startswith(p) for p in ["H", "TP", "FID", "LOGO", "REF", "G"]):
             continue
+        known_ncs = set()
+        lid = lib_by_ref.get(ref)
+        if lid and lid in nc_pins_by_ref:
+            known_ncs = nc_pins_by_ref[lid]
         for pnum, pinfo in data["pads"].items():
             if not pinfo["net"]:
-                # OPA381 MSOP-8 has pins 1, 5, 8 as NC
-                if ref.startswith("U_TIA") and pnum in ["1", "5", "8"]:
+                if pnum in known_ncs:
                     continue
                 floating_pads.append({"reference": ref, "pad": pnum})
 
     # 6. Multi-Unit IC Coverage in Schematic
     missing_units = []
     if has_sch:
-        # Check units in schematic instances
-        inst_pattern = re.compile(r'\(symbol\s+.*?\(property\s+"Reference"\s+"([^"]+)".*?\(unit\s+(\d+)\)', re.DOTALL)
-        units_by_ref = {}
-        for m in inst_pattern.finditer(sch_text):
-            r = m.group(1)
-            u = int(m.group(2))
-            units_by_ref.setdefault(r, set()).add(u)
-            
-        for r, u_set in units_by_ref.items():
-            # Check dual comparators / op-amps starting with U_ (TLV3202)
-            if r.startswith("U_CMP") or r.startswith("U_TLV"):
-                expected = {1, 2, 3}  # Unit 1 (comp A), Unit 2 (comp B), Unit 3 (power)
+        for r, u_set in inst_units_by_ref.items():
+            lid = lib_by_ref.get(r)
+            if lid in units_by_lib:
+                expected = units_by_lib[lid]
                 if not expected.issubset(u_set):
-                    missing_units.append({"reference": r, "missing": list(expected - u_set)})
+                    missing_units.append({"reference": r, "lib_id": lid, "missing_units": sorted(list(expected - u_set))})
 
 
     status = "pass"

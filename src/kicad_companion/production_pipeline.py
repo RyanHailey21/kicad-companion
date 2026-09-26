@@ -80,8 +80,15 @@ def build_production_package(
             "errors": error_count,
         }
 
-    # 2. Export Gerbers (Standard Electrical & Mech Layers with Protel Extensions)
-    layers = ["F.Cu", "B.Cu", "F.SilkS", "B.SilkS", "F.Mask", "B.Mask", "F.Paste", "B.Paste", "Edge.Cuts"]
+    # 2. Export Gerbers (Dynamic Copper Layers + Standard Mech Layers with Protel Extensions)
+    pcb_text = p_path.read_text(encoding="utf-8", errors="ignore")
+    copper_layers = ["F.Cu"]
+    for in_layer in ["In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu"]:
+        if f'"{in_layer}"' in pcb_text:
+            copper_layers.append(in_layer)
+    copper_layers.append("B.Cu")
+
+    layers = copper_layers + ["F.SilkS", "B.SilkS", "F.Mask", "B.Mask", "F.Paste", "B.Paste", "Edge.Cuts"]
     gerber_cmd = [
         kicad_cli,
         "pcb",
@@ -152,7 +159,7 @@ def build_production_package(
         try:
             r2d = render_pcb_2d(str(p_path))
             src_2d = Path(r2d["file_path"])
-            dest_2d = docs_images_dir / "sensor_pcb_2d.svg"
+            dest_2d = docs_images_dir / f"{stem}_pcb_2d.svg"
             if src_2d.is_file():
                 shutil.copyfile(src_2d, dest_2d)
                 doc_renders["pcb_2d_svg"] = str(dest_2d)
@@ -163,7 +170,7 @@ def build_production_package(
             try:
                 rsch = render_schematic(str(s_path))
                 src_sch = Path(rsch["primary_file"])
-                dest_sch = docs_images_dir / "sensor_schematic.svg"
+                dest_sch = docs_images_dir / f"{stem}_schematic.svg"
                 if src_sch.is_file():
                     shutil.copyfile(src_sch, dest_sch)
                     doc_renders["schematic_svg"] = str(dest_sch)
