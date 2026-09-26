@@ -23,6 +23,13 @@ from .placement import (
     resolve_placement_overlaps as _resolve_placement_overlaps,
     sanitize_silkscreen as _sanitize_silkscreen,
 )
+from .intent_context import ensure_project_context as _ensure_project_context
+from .spice_verifier import (
+    audit_spice_models as _audit_spice_models,
+    run_circuit_simulation as _run_circuit_simulation,
+)
+from .pinout_audit import audit_component_pinouts as _audit_component_pinouts
+from .production_pipeline import build_production_package as _build_production_package
 
 server = MCPServer("kicad-companion")
 
@@ -322,6 +329,124 @@ def sanitize_silkscreen(
         pcb_path=pcb_path,
         hide_passives=hide_passives,
         min_pad_clearance_mm=min_pad_clearance_mm,
+    )
+
+
+@server.tool()
+def ensure_project_context(
+    target_path: str,
+    title: Optional[str] = None,
+    purpose: Optional[str] = None,
+    target_fab: str = "jlcpcb",
+) -> Dict[str, Any]:
+    """Ensure a structured PROJECT_CONTEXT.md exists at the root of the KiCad project.
+    
+    Establishes project identity, circuit intent, electrical constraints, active IC inventory,
+    and SPICE verification status. Constrains agents to follow project-level intent.
+    
+    Args:
+        target_path: Path to any file or directory in the project repo.
+        title: Optional title/name for the hardware project.
+        purpose: Concise description of project goal and circuit intent.
+        target_fab: Target fabrication house ('jlcpcb', 'pcbway', etc.).
+    """
+    return _ensure_project_context(
+        target_path=target_path,
+        title=title,
+        purpose=purpose,
+        target_fab=target_fab,
+    )
+
+
+@server.tool()
+def audit_spice_models(
+    target_path: str,
+) -> Dict[str, Any]:
+    """Audit schematic components against real manufacturer SPICE macromodels.
+    
+    Verifies that all operational amplifiers, comparators, transistors, diodes, and
+    voltage references have legitimate SPICE macromodels (.lib, .sub, .cir, .model)
+    before board layout or fabrication. If missing, requests user to provide them.
+    
+    Args:
+        target_path: Path to project root, schematic, or PCB file.
+    """
+    return _audit_spice_models(target_path=target_path)
+
+
+@server.tool()
+def run_circuit_simulation(
+    target_path: str,
+    sim_type: str = "both",
+) -> Dict[str, Any]:
+    """Execute headless SPICE simulation and return concise quantitative electrical metrics.
+    
+    Runs native SPICE netlists or project simulation testbenches via KiCad's bundled
+    NGSPICE solver without polluting agent context with raw waveform dumps.
+    
+    Args:
+        target_path: Path to project root or simulation netlist (.cir).
+        sim_type: 'transient', 'ac', or 'both'.
+    """
+    return _run_circuit_simulation(target_path=target_path, sim_type=sim_type)
+
+
+@server.tool()
+def audit_component_pinouts(
+    pcb_path: str,
+    sch_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Audit schematic and PCB pinouts against known component traps and datasheet conventions.
+    
+    Checks:
+    1. LED Polarity: Pad 1 (Cathode/square) vs Pad 2 (Anode/round) wiring.
+    2. Diode Polarity: Pin 1 (Cathode) vs Pin 2 (Anode).
+    3. MOSFET / Transistor: SOT-23 Gate/Source/Drain assignments (AO3400A).
+    4. Unconnected / Floating Pads: Pads with missing net assignments.
+    5. Annotation Syntax: References without trailing digits (e.g. RLED, U_REF) that block KiCad GUI F8.
+    6. Multi-Unit Coverage: Multi-part ICs missing power units or auxiliary gates.
+    
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        sch_path: Optional path to .kicad_sch.
+    """
+    return _audit_component_pinouts(pcb_path=pcb_path, sch_path=sch_path)
+
+
+@server.tool()
+def build_production_package(
+    pcb_path: str,
+    output_dir: Optional[str] = None,
+    revision: str = "revA",
+    fab_house: str = "jlcpcb",
+    generate_3d_step: bool = True,
+    generate_doc_svgs: bool = True,
+) -> Dict[str, Any]:
+    """Execute end-to-end manufacturing export pipeline in one single headless call.
+    
+    Abstracts redundant tool calling. Performs:
+    1. DRC Pre-Flight Gate (halts if errors exist).
+    2. Protel Gerbers & Drill Export (.gtl, .gbl, .gts, .gbs, .gto, .gbo, .gtp, .gbp, .gm1, .drl).
+    3. Production ZIP Archive ready for instant upload to JLCPCB/PCBWay.
+    4. SMT Assembly Artifacts (CPL pick-and-place & BOM).
+    5. Mechanical CAD 3D Model (.step).
+    6. Documentation Vector Renders (2D PCB layout & schematic SVGs).
+    
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        output_dir: Optional custom output directory.
+        revision: Board revision label (e.g. 'revA').
+        fab_house: Target manufacturer ('jlcpcb', 'pcbway', etc.).
+        generate_3d_step: Whether to export full 3D STEP file. Default True.
+        generate_doc_svgs: Whether to refresh vector SVGs for documentation. Default True.
+    """
+    return _build_production_package(
+        pcb_path=pcb_path,
+        output_dir=output_dir,
+        revision=revision,
+        fab_house=fab_house,
+        generate_3d_step=generate_3d_step,
+        generate_doc_svgs=generate_doc_svgs,
     )
 
 

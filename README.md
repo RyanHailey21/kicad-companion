@@ -8,22 +8,35 @@ Compatible with **Antigravity**, **Claude (Desktop & Code)**, and **OpenAI Codex
 
 ## Capabilities
 
-1. **Headless Visual Renders (`render_pcb_3d`, `render_pcb_2d`, `render_schematic`)**:
+1. **Project Intent Governance (`ensure_project_context`)**:
+   - Parses `.kicad_pcb` and `.kicad_sch` to establish and maintain a persistent `PROJECT_CONTEXT.md` at the root of the PCB directory.
+   - Constrains AI agents to clear intent, physical constraints, layer counts, power rails, SPICE model tracking, and pre-fab checklist verification.
+2. **Headless SPICE Simulation & Auditing (`audit_spice_models`, `run_circuit_simulation`)**:
+   - Scans active ICs, normalizes part numbers, and verifies manufacturer `.lib`/`.cir` macromodels (instructs agent to prompt user if missing).
+   - Headlessly drives Berkeley NGSPICE (via KiCad 10's official `ngspice.dll` or CLI) and distills waveforms into compact ~50 token figures of merit (transient peaks, DC bias, -3dB bandwidth) to eliminate context bloat.
+3. **Pre-Flight Pinout, Polarity & Annotation Auditor (`audit_component_pinouts`)**:
+   - Detects SMD LED Pad 1 Cathode vs Pad 2 Anode polarity inversions against schematic nets.
+   - Verifies diode orientation, SOT-23 MOSFET gate/source/drain mapping, and unrouted pads.
+   - Blocks KiCad GUI F8 "Schematic is not fully annotated" errors by catching alphanumeric reference designators lacking trailing digits.
+4. **One-Shot Manufacturing Package Pipeline (`build_production_package`)**:
+   - Consolidates 10+ granular tool calls into 1 atomic operation: DRC pre-flight -> Protel Gerbers & drill generation -> zip packaging -> CPL centroid `.csv` export -> 3D STEP model -> 2D PCB & schematic documentation SVGs.
+5. **Headless Visual Renders (`render_pcb_3d`, `render_pcb_2d`, `render_schematic`)**:
    - Generates high-resolution 3D board renders (top, bottom, isometric) via `kicad-cli pcb render`.
    - Generates 2D vector layer plots (F.Cu, B.Cu, Silkscreen, Edge.Cuts) via `kicad-cli pcb export svg`.
    - Generates vector schematic sheet renders via `kicad-cli sch export svg`.
-2. **Intelligent DRC/ERC Triage (`triage_pcb_drc`)**:
+6. **Intelligent DRC/ERC Triage (`triage_pcb_drc`)**:
    - Runs `kicad-cli pcb drc --format json` headlessly.
    - Categorizes violations into **Critical Blockers** (shorts, open tracks), **Fab Hazards** (clearance, annular ring), and **Cosmetic Warnings** with exact mm coordinates and suggested fixes.
-3. **Automated Placement & Silkscreen Sanitizer (`check_placement_overlaps`, `resolve_placement_overlaps`, `sanitize_silkscreen`)**:
+7. **Automated Placement & Silkscreen Sanitizer (`check_placement_overlaps`, `resolve_placement_overlaps`, `sanitize_silkscreen`)**:
    - Evaluates bounding-box and courtyard clearances between components and board outlines.
    - Automatically clusters related passives around ICs and resolves spatial collisions to achieve 100/100 placement scores.
    - Moves silkscreen designators outside pads and components with standardized offsets.
-4. **Autonomous Routing Pipeline (`export_specctra_dsn`, `autoroute_board`, `import_specctra_ses`, `sync_pcb_nets`)**:
+8. **Autonomous Routing Pipeline (`export_specctra_dsn`, `autoroute_board`, `import_specctra_ses`, `sync_pcb_nets`)**:
    - Headlessly synchronizes schematic netlists and netclasses directly into `.kicad_pcb` files.
    - Translates KiCad boards into Specctra DSN format with netclass routing constraints and keepouts.
    - Executes Freerouting headlessly with real-time pass monitoring and imports SES route solutions directly back into KiCad copper layers.
-5. **Project-Local Intelligence (`get_project_context`, `execute_project_script`)**:
+9. **Project-Local Intelligence & Macros (`list_circuit_macros`, `compile_circuit_macro`, `get_project_context`, `execute_project_script`)**:
+   - Parametric subcircuit macro compiler (voltage dividers, I2C pullups, status LEDs, bypass capacitor banks) producing instant batch recipes.
    - Automatically detects and inherits `.companion/rules.json` (stackups, manufacturer design rules, preferred parts).
    - Dynamically loads and runs project-specific automation scripts from `.companion/scripts/`.
 

@@ -1,6 +1,6 @@
 ---
 name: kicad-companion
-description: "Universal KiCad 10 visual inspection, DRC triage, parametric circuit macro compiler, Specctra/Freerouting autorouting, net synchronization, and project intelligence assistant. Use alongside Konnect to render 3D/2D views, triage DRC violations, sync pad nets, autoroute boards headlessly, compile circuit macros into batch recipes, and supervise KiCad lifecycle."
+description: "Universal KiCad 10 hardware accelerator: visual inspection, DRC triage, SPICE circuit simulation, pinout/polarity auditing, project intent governance, one-shot manufacturing export, parametric circuit macros, and headless Specctra autorouting. Abstract redundant multi-turn workflows away to minimize LLM token usage and enforce zero-defect hardware design rules."
 ---
 
 # KiCad Companion — Visual Feedback & Intelligence Workflow
@@ -10,7 +10,7 @@ This skill guides AI agents (Antigravity, Claude, Codex) on using the **`kicad-c
 ## Division of Labor
 
 - **Konnect MCP:** Handles atomic live modifications (adding/moving footprints, manual net edits, interactive routing, live NNG/Protobuf IPC).
-- **KiCad Companion MCP:** Handles perception, headless rendering, DRC intelligence, circuit macro compiling, process supervision, headless netlist-to-PCB pad synchronization, and headless Specctra/Freerouting autorouting pipelines.
+- **KiCad Companion MCP:** Handles high-level workflow abstractions, project intent governance, headless SPICE simulation, pinout/polarity auditing, one-shot production packaging, perception/rendering, DRC intelligence, circuit macro compiling, process supervision, headless netlist-to-PCB pad synchronization, and headless Specctra/Freerouting autorouting pipelines.
 
 ---
 
@@ -173,9 +173,83 @@ Every project repository can contain a `.companion/` folder with custom rules:
 
 ---
 
-## 10. Overarching Hardware Standards (Mandatory for ALL Agents)
+### 10. Project Intent Governance (`PROJECT_CONTEXT.md`)
+Before initiating, modifying, or manufacturing any PCB project, the agent must ensure a structured `PROJECT_CONTEXT.md` file exists at the root of the PCB directory:
+```python
+ensure_project_context(
+    target_path="path/to/project_dir",
+    title="Neuromorphic IR Event Sensor",
+    purpose="Sub-millisecond optical transient event detector with differential photodiode transimpedance amplification",
+    target_fab="JLCPCB 2-Layer Standard"
+)
+```
+**Why this matters:**
+- Automatically parses `.kicad_pcb` and `.kicad_sch` to extract physical board outline dimensions, layer count, component footprint count, power rail nets, active ICs, and SPICE models.
+- Establishes persistent hardware requirements, power budgets, stackup constraints, and a pre-fab verification checklist.
+- Keeps any subsequent agent (or user) fully aligned on the functional purpose, constraints, and progress of the board.
 
-Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 8 design rules:
+---
+
+### 11. Headless SPICE Simulation & Vendor Macromodel Verification
+Never synthesize or finalize analog, sensor, or power circuits without quantitative SPICE verification using real vendor models:
+1. **Audit Vendor SPICE Models:**
+   ```python
+   audit_spice_models(target_path="path/to/project_dir")
+   ```
+   *Scans all active ICs (`U*`, `Q*`, `DPD*`, `LED*`), normalizes manufacturer part numbers (e.g. `OPA381AIDGKR` -> `OPA381`, `74LVC1G123DCU` -> `74LVC1G123`), and verifies matching `.lib`/`.cir` files exist. If a model is missing, the tool instructs the agent to pause and ask the user to provide it.*
+2. **Execute Headless SPICE Simulation:**
+   ```python
+   run_circuit_simulation(
+       target_path="path/to/project_dir",
+       sim_type="transient",
+       stop_time_ms=10.0,
+       step_time_us=1.0
+   )
+   ```
+   *Runs Berkeley NGSPICE headlessly via KiCad's official `ngspice.dll` or CLI. Returns a compact ~50 token summary of critical electrical figures of merit (transient peaks, DC operating bias, rise/fall times, -3dB bandwidth) rather than dumping thousands of raw waveform points.*
+
+---
+
+### 12. Pre-Flight Component Pinout, Polarity & Reference Annotation Audit
+Prevent costly board spins and fabrication failures from footprint pin mismatches, inverted diodes, or unannotated KiCad GUI blockers:
+```python
+audit_component_pinouts(
+    pcb_path="path/to/board.kicad_pcb",
+    sch_path="path/to/board.kicad_sch" # optional, auto-detected if omitted
+)
+```
+**Checks performed:**
+- **LED Polarity:** Validates SMD LED Pad 1 Cathode vs Pad 2 Anode conventions against schematic net connections.
+- **Diode Polarity:** Verifies Cathode/Anode pad alignment against circuit net direction.
+- **Transistor/MOSFET Pinout:** Verifies Gate/Drain/Source pin ordering on SOT-23/SOT-23-3 packages.
+- **Unrouted / Floating Pads:** Detects pads missing copper track or plane connections.
+- **Reference Designator Annotations:** Flags any reference designator lacking trailing digits (e.g. `RLED`, `U_REF`, `ROS_ON_TL`), which cause KiCad GUI's F8 "Schematic is not fully annotated" update blockers.
+
+---
+
+### 13. One-Shot Manufacturing Package Pipeline
+Rather than executing 10 separate tools (DRC, export drill, export gerbers, zip, export pos, export 3D step, export 2D SVGs), execute the entire fabrication package in one atomic step:
+```python
+build_production_package(
+    pcb_path="path/to/board.kicad_pcb",
+    output_dir="path/to/production", # optional
+    revision="revA",
+    fab_house="JLCPCB"
+)
+```
+**Atomic Pipeline Steps:**
+1. **DRC Pre-Flight:** Headless DRC run; stops immediately if critical copper clearance or unrouted errors exist.
+2. **Gerber & Drill Generation:** Exports Protel-standard layers (`.GTL`, `.GBL`, `.GTS`, `.GBS`, `.GTO`, `.GBO`, `.GKO`, `.DRL`).
+3. **Automated ZIP Archive:** Packages gerbers into `<revision>-gerber.zip` ready for immediate JLCPCB/PCBWay upload.
+4. **Centroid / CPL Export:** Generates pick-and-place `.csv` with LCSC Part # cross-referencing.
+5. **High-Fidelity 3D STEP Solid Model:** Exports `<revision>.step` for mechanical CAD clearance verification.
+6. **Vector Documentation SVGs:** Updates top/bottom copper, silkscreen, and schematic sheet SVGs for rapid review.
+
+---
+
+## 14. Overarching Hardware Standards (Mandatory for ALL Agents)
+
+Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 14 design rules:
 
 ### Rule 1: Strict Footprint Provenance (Zero Synthetic Footprints)
 - **NEVER** synthesize or invent custom `.kicad_mod` footprint pad geometries from scratch.
@@ -239,3 +313,27 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
   1. `check_placement_overlaps`: Automatically identify pairwise courtyard collisions, board edge violations, and mounting hole clearances.
   2. `resolve_placement_overlaps`: Automatically apply geometric relaxation and grid snapping to separate overlapping components while preserving fixed connectors and sensors.
   3. `sanitize_silkscreen`: Automatically declutter passive reference texts and guarantee $\ge 0.50\text{ mm}$ clearance to copper pads.
+
+### Rule 11: Mandatory Root `PROJECT_CONTEXT.md` Intent File
+- Context is king: Before touching any schematic or PCB layout, create or verify `PROJECT_CONTEXT.md` using `ensure_project_context(target_path=...)`.
+- The file documents the project purpose, architecture, key components, power budget, board physical constraints, fab rules, and signoff checklist.
+- Constrains the agent to maintain clear intent throughout the hardware design cycle.
+
+### Rule 12: Mandatory SPICE Simulation Gate (Real Manufacturer Models)
+- Before finalizing analog, sensor, or power circuits, verify electronic functionality using true manufacturer SPICE models via `audit_spice_models(target_path=...)` and `run_circuit_simulation(target_path=..., sim_type=...)`.
+- Never skip simulation or fake operational amplifier / sensor behavior.
+- If a real manufacturer model is missing, **STOP and ask the user to provide it**.
+- Output compact key figures of merit (gain, bandwidth, transient peak, rise/fall times) instead of dumping thousands of raw waveform points to preserve agent tokens.
+
+### Rule 13: Mandatory Pinout, Polarity, and Annotation Audit Gate
+- Before generating production packages or exporting gerbers, call `audit_component_pinouts(pcb_path=..., sch_path=...)`.
+- Specifically checks:
+  - Diode and LED polarity traps (Pad 1 Cathode vs Pad 2 Anode matching physical footprints).
+  - Transistor/MOSFET pinout alignment (Drain/Source/Gate vs Pin 1/2/3).
+  - Unrouted or floating pads.
+  - Reference designator annotation compliance: all references must end in trailing digits, avoiding KiCad GUI F8 "Schematic is not fully annotated" blockers like `RLED`, `U_REF`.
+
+### Rule 14: Token Conservation & Atomic Pipeline Abstraction
+- Avoid executing 10-15 granular MCP/shell tool calls (export drill, export gerbers, zip files, export pos, render 3D, render 2D, export schematics, run DRC).
+- Use `build_production_package(pcb_path=..., output_dir=..., revision=..., fab_house=...)` to generate a 100% complete, verified manufacturing release in a single atomic tool call.
+- Ensure all tool outputs return compact, structured JSON summaries instead of verbose unparsed logs.
