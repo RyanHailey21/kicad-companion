@@ -30,8 +30,22 @@ foreach ($dest in $skillDestinations) {
             Remove-Item -Path $dest -Recurse -Force
         }
     }
-    Write-Host "Creating Directory Junction: $dest -> $skillSource" -ForegroundColor Green
-    New-Item -ItemType Junction -Path $dest -Target $skillSource | Out-Null
+    if ($dest -like "*\.gemini\*") {
+        # Antigravity filesystem scanner ignores NTFS Directory Junctions (ReparsePoints); create native folder with HardLink
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+        $destSkillFile = Join-Path $dest "SKILL.md"
+        $srcSkillFile = Join-Path $skillSource "SKILL.md"
+        try {
+            New-Item -ItemType HardLink -Path $destSkillFile -Target $srcSkillFile -Force | Out-Null
+            Write-Host "Created Hardlink for Antigravity skill: $destSkillFile -> $srcSkillFile" -ForegroundColor Green
+        } catch {
+            Copy-Item -Path $srcSkillFile -Destination $destSkillFile -Force
+            Write-Host "Copied Antigravity skill: $srcSkillFile -> $destSkillFile" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "Creating Directory Junction: $dest -> $skillSource" -ForegroundColor Green
+        New-Item -ItemType Junction -Path $dest -Target $skillSource | Out-Null
+    }
 }
 
 # 2. Register MCP Server in Antigravity (~/.gemini/config/mcp_config.json)
