@@ -415,16 +415,17 @@ def sanitize_silkscreen(
             is_passive = False
 
         if hide_passives and is_passive:
-            if "(hide yes)" not in fp:
+            m_ref_prop = re.search(r'\(property\s+"Reference"\s+"[^"]+".*?\n\t\t\)', fp, flags=re.DOTALL)
+            if m_ref_prop and "(hide yes)" not in m_ref_prop.group(0):
                 hidden_refs.append(ref)
                 # Inject (hide yes) into Reference property
                 def add_hide(pm):
                     p = pm.group(0)
                     if "(hide yes)" not in p:
                         last_p = p.rfind(")")
-                        p = p[:last_p] + "\n\t\t\t(hide yes)\n\t\t)"
+                        p = p[:last_p] + "\t(hide yes)\n\t\t)"
                     return p
-                fp = re.sub(r'\(property "Reference"\s+"[^"]+".*?\n\t\t\)', add_hide, fp, flags=re.DOTALL)
+                fp = re.sub(r'\(property\s+"Reference"\s+"[^"]+".*?\n\t\t\)', add_hide, fp, count=1, flags=re.DOTALL)
 
         return fp
 
