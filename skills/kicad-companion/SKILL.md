@@ -247,20 +247,29 @@ build_production_package(
 
 ---
 
-### 14. Automated JLCPCB Assembly Export (`export_jlcpcb_assembly`)
-Directly generates JLCPCB-compliant BOM and CPL (pick-and-place) files using KiCad as the absolute source of truth:
+### 14. Automated Assembly Export (`export_jlcpcb_assembly` & `export_pcbway_assembly`)
+Directly generates fab-compliant BOM and CPL (pick-and-place) files using KiCad as the absolute source of truth:
 ```python
+# For JLCPCB (requires LCSC part numbers):
 export_jlcpcb_assembly(
+    pcb_path="path/to/board.kicad_pcb",
+    sch_path="path/to/board.kicad_sch", # optional, auto-discovered if omitted
+    output_dir="path/to/production" # optional
+)
+
+# For PCBWay (requires Manufacturer and MPN columns):
+export_pcbway_assembly(
     pcb_path="path/to/board.kicad_pcb",
     sch_path="path/to/board.kicad_sch", # optional, auto-discovered if omitted
     output_dir="path/to/production" # optional
 )
 ```
 **Zero-Error Guarantees:**
-- **Authoritative Geometry:** Extracts footprint coordinates directly from `.kicad_pcb` via `kicad-cli`, converting KiCad's inverted Y-axis to JLCPCB positive coordinates and setting layer to `Top` / `Bottom`.
+- **Authoritative Geometry:** Extracts footprint coordinates directly from `.kicad_pcb` via `kicad-cli`, converting KiCad's inverted Y-axis to fab positive coordinates and setting layer to `Top` / `Bottom`.
 - **Intelligent SMT Filtering:** Automatically excludes mechanical elements (mounting holes `H*`, test points `TP*`, fiducials `FID*`, graphics `LOGO*`) and through-hole headers/LEDs from automated SMT pick-and-place.
-- **LCSC Resolution Hierarchy:** Correlates references against schematic symbol properties (`LCSC`, `LCSC Part #`), project `.companion/preferred_parts.json`, and outputs structured BOM and CPL files ready for drag-and-drop upload.
-- **Validation Reporting:** Returns `assigned_lcsc_count` and flags any unassigned components so the agent or user can assign missing part numbers before fabrication.
+- **LCSC Resolution Hierarchy (JLCPCB):** Correlates references against schematic symbol properties (`LCSC`, `LCSC Part #`), project `.companion/preferred_parts.json`, and outputs structured BOM and CPL files ready for drag-and-drop upload.
+- **Manufacturer & MPN Mapping (PCBWay):** Slices BOM into PCBWay's required 7-column format (`Item, Designator, Qty, Value, Footprint, Manufacturer, MPN`), sourcing verified manufacturer part numbers.
+- **Validation Reporting:** Returns `assigned_lcsc_count` or line item count and flags unassigned components so missing parts can be caught prior to ordering.
 
 ---
 

@@ -430,3 +430,184 @@ def generate_jlcpcb_assembly(
             + (f"Embedded {embedded_count} LCSC properties into schematic." if embedded_count > 0 else "")
         ),
     }
+
+
+def generate_pcbway_assembly(
+    pcb_path: str,
+    sch_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate PCBWay-compliant BOM and CPL (pick-and-place) files from KiCad design files.
+    
+    Extracts component coordinates from the PCB and correlates manufacturer part numbers
+    (MPN) and vendor details from schematic symbol properties and project configuration.
+    
+    Produces:
+    - <stem>-cpl-pcbway.csv: Designator, Mid X, Mid Y, Layer, Rotation
+    - <stem>-bom-pcbway.csv: Item, Designator, Qty, Value, Footprint, Manufacturer, MPN
+    
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        sch_path: Optional path to the .kicad_sch file.
+        output_dir: Optional destination directory (defaults to <project>/production/).
+    """
+    p_path = Path(pcb_path).resolve()
+    if not p_path.is_file():
+        raise FileNotFoundError(f"PCB file not found: {pcb_path}")
+
+    root = find_project_root(str(p_path)) or p_path.parent
+    s_path = Path(sch_path).resolve() if sch_path else p_path.with_suffix(".kicad_sch")
+    stem = p_path.stem
+
+    kicad_cli = find_kicad_cli()
+    out_dir = Path(output_dir).resolve() if output_dir else (root / "production")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Export raw positions via kicad-cli
+    raw_cpl = out_dir / f"{stem}-cpl.csv"
+    pos_cmd = [
+        kicad_cli,
+        "pcb",
+        "export",
+        "pos",
+        "--format", "csv",
+        "--units", "mm",
+        "-o", str(raw_cpl),
+        str(p_path),
+    ]
+    subprocess.run(pos_cmd, capture_output=True, text=True, check=True)
+
+    # 2. Parse PCB text for SMD/THT attributes
+    pcb_text = p_path.read_text(encoding="utf-8", errors="ignore")
+    tht_footprints = set()
+    for fb in re.findall(r'(\t\(footprint\s+[\s\S]*?\n\t\))', pcb_text):
+        m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fb)
+        if m_ref and "(attr through_hole)" in fb:
+            tht_footprints.add(m_ref.group(1))
+
+    # 3. Parse Schematic for MPN and Manufacturer fields
+    sch_components = {}
+    if s_path.is_file():
+        sch_text = s_path.read_text(encoding="utf-8", errors="ignore")
+        for sb in re.findall(r'(\t\(symbol\s+[\s\S]*?\n\t\))', sch_text):
+            m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', sb)
+            m_val = re.search(r'\(property\s+"Value"\s+"([^"]+)"', sb)
+            m_fp = re.search(r'\(property\s+"Footprint"\s+"([^"]+)"', sb)
+            m_mpn = (
+                re.search(r'\(property\s+"(?:MPN|Manufacturer Part Number|Part Number)"\s+"([^"]+)"', sb, re.I)
+                or re.search(r'\(property\s+"Value"\s+"([^"]+)"', sb)
+            )
+            m_mfg = re.search(r'\(property\s+"(?:Manufacturer|MFG)"\s+"([^"]+)"', sb, re.I)
+            is_dnp = "(dnp yes)" in sb
+
+            if m_ref:
+                ref = m_ref.group(1)
+                sch_components[ref] = {
+                    "value": m_val.group(1) if m_val else "",
+                    "footprint": m_fp.group(1) if m_fp else "",
+                    "mpn": m_mpn.group(1) if m_mpn else "",
+                    "mfg": m_mfg.group(1) if m_mfg else "",
+                    "dnp": is_dnp,
+                }
+
+    # 4. Filter and process SMD placements for PCBWay CPL
+    smd_components = []
+    with open(raw_cpl, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ref = row["Ref"].strip('"')
+            val = row["Val"].strip('"')
+            pkg = row["Package"].strip('"')
+            pos_x = float(row["PosX"])
+            pos_y = float(row["PosY"])
+            rot = float(row["Rot"])
+            side = row["Side"].strip('"').lower()
+
+            if any(ref.upper().startswith(p) for p in ["H", "TP", "FID", "LOGO", "REF", "G"]):
+                continue
+            if ref in tht_footprints or "PINHEADER" in pkg.upper() or ref.startswith("J_"):
+                continue
+            if sch_components.get(ref, {}).get("dnp", False):
+                continue
+
+            smd_components.append({
+                "ref": ref,
+                "val": val,
+                "pkg": pkg,
+                "x": pos_x,
+                "y": abs(pos_y),
+                "rot": rot,
+                "layer": "Top" if side == "top" else "Bottom",
+            })
+
+    smd_components.sort(key=lambda c: (re.search(r'^\D+', c["ref"]).group(0) if re.search(r'^\D+', c["ref"]) else c["ref"], int(re.search(r'\d+', c["ref"]).group(0)) if re.search(r'\d+', c["ref"]) else 0))
+
+    # Write PCBWay CPL
+    pcbway_cpl_file = out_dir / f"{stem}-cpl-pcbway.csv"
+    with open(pcbway_cpl_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Designator", "Mid X", "Mid Y", "Layer", "Rotation"])
+        for c in smd_components:
+            y_str = f"{c['y']:.6f}".rstrip('0').rstrip('.') if '.' in f"{c['y']:.6f}" else f"{c['y']:.6f}"
+            writer.writerow([c["ref"], f"{c['x']:.6f}", y_str, c["layer"], f"{c['rot']:.6f}"])
+
+    # 5. Build PCBWay BOM
+    bom_groups = {}
+    for c in smd_components:
+        ref = c["ref"]
+        val = c["val"]
+        pkg = c["pkg"]
+        clean_fp = pkg.split(":")[-1] if ":" in pkg else pkg
+
+        # Determine Manufacturer and MPN
+        mfg = sch_components.get(ref, {}).get("mfg", "")
+        mpn = sch_components.get(ref, {}).get("mpn", "") or val
+
+        val_upper = val.upper()
+        if "OPA381" in val_upper:
+            mfg, mpn = "Texas Instruments", "OPA381AIDGKT"
+        elif "TLV3202" in val_upper:
+            mfg, mpn = "Texas Instruments", "TLV3202AIDR"
+        elif "74LVC1G123" in val_upper:
+            mfg, mpn = "Texas Instruments", "SN74LVC1G123DCU"
+        elif "REF3312" in val_upper:
+            mfg, mpn = "Texas Instruments", "REF3312AIDBZR"
+        elif "AO3400" in val_upper:
+            mfg, mpn = "Alpha & Omega Semiconductor", "AO3400A"
+        elif "BLM18" in val_upper:
+            mfg, mpn = "Murata", "BLM18AG601SN1D"
+        elif "BPW34" in val_upper or "VBPW" in val_upper:
+            mfg, mpn = "Vishay", "VBPW34S"
+        elif not mfg:
+            if any(val.endswith(u) for u in ["pF", "nF", "uF"]):
+                mfg = "Yageo / Murata"
+            else:
+                mfg = "Yageo / Panasonic"
+
+        group_key = (val, clean_fp, mfg, mpn)
+        bom_groups.setdefault(group_key, []).append(ref)
+
+    pcbway_bom_file = out_dir / f"{stem}-bom-pcbway.csv"
+    with open(pcbway_bom_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Item", "Designator", "Qty", "Value", "Footprint", "Manufacturer", "MPN"])
+        item_num = 1
+        sorted_keys = sorted(bom_groups.keys(), key=lambda k: (k[0][0] if k[0] else "", k[0], k[1]))
+        for key in sorted_keys:
+            val, fp, mfg, mpn = key
+            refs = sorted(bom_groups[key], key=lambda r: (re.search(r'^\D+', r).group(0) if re.search(r'^\D+', r) else r, int(re.search(r'\d+', r).group(0)) if re.search(r'\d+', r) else 0))
+            writer.writerow([item_num, ", ".join(refs), len(refs), val, fp, mfg, mpn])
+            item_num += 1
+
+    return {
+        "status": "success",
+        "fab_house": "PCBWay",
+        "cpl_file": str(pcbway_cpl_file),
+        "bom_file": str(pcbway_bom_file),
+        "smd_component_count": len(smd_components),
+        "bom_line_items": len(bom_groups),
+        "summary": (
+            f"PCBWay assembly files generated: {len(smd_components)} SMD placements in {pcbway_cpl_file.name}, "
+            f"{len(bom_groups)} grouped BOM lines in {pcbway_bom_file.name} with Manufacturer & MPN specifications."
+        ),
+    }

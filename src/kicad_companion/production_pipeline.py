@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import find_kicad_cli
-from .jlcpcb_assembly import generate_jlcpcb_assembly
+from .jlcpcb_assembly import generate_jlcpcb_assembly, generate_pcbway_assembly
 from .project_context import find_project_root
 from .renderer import render_pcb_2d, render_schematic
 
@@ -139,9 +139,15 @@ def build_production_package(
     ]
     subprocess.run(pos_cmd, capture_output=True, text=True, check=False)
 
-    jlcpcb_assembly_info = None
+    assembly_info = None
     if fab_house.lower() == "jlcpcb":
-        jlcpcb_assembly_info = generate_jlcpcb_assembly(
+        assembly_info = generate_jlcpcb_assembly(
+            pcb_path=str(p_path),
+            sch_path=str(s_path) if s_path.is_file() else None,
+            output_dir=str(production_dir),
+        )
+    elif fab_house.lower() == "pcbway":
+        assembly_info = generate_pcbway_assembly(
             pcb_path=str(p_path),
             sch_path=str(s_path) if s_path.is_file() else None,
             output_dir=str(production_dir),
@@ -200,7 +206,8 @@ def build_production_package(
             "size_mb": round(step_path.stat().st_size / (1024 * 1024), 2) if step_path.is_file() else 0,
         },
         "cpl_file": str(cpl_path),
-        "jlcpcb_assembly": jlcpcb_assembly_info,
+        "assembly_package": assembly_info,
+        "jlcpcb_assembly": assembly_info if fab_house.lower() == "jlcpcb" else None,
         "total_gerber_files": len(list(gerbers_dir.glob("*.*"))),
         "documentation_renders": doc_renders,
         "summary": (

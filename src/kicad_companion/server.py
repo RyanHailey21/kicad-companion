@@ -30,7 +30,10 @@ from .spice_verifier import (
 )
 from .pinout_audit import audit_component_pinouts as _audit_component_pinouts
 from .production_pipeline import build_production_package as _build_production_package
-from .jlcpcb_assembly import generate_jlcpcb_assembly as _generate_jlcpcb_assembly
+from .jlcpcb_assembly import (
+    generate_jlcpcb_assembly as _generate_jlcpcb_assembly,
+    generate_pcbway_assembly as _generate_pcbway_assembly,
+)
 
 server = MCPServer("kicad-companion")
 
@@ -479,6 +482,30 @@ def export_jlcpcb_assembly(
         sch_path=sch_path,
         output_dir=output_dir,
         preferred_parts_path=preferred_parts_path,
+    )
+
+
+@server.tool()
+def export_pcbway_assembly(
+    pcb_path: str,
+    sch_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate PCBWay-compliant BOM and CPL (pick-and-place) files directly from KiCad design files.
+    
+    Produces:
+    - <stem>-cpl-pcbway.csv: Designator, Mid X, Mid Y, Layer, Rotation
+    - <stem>-bom-pcbway.csv: Item, Designator, Qty, Value, Footprint, Manufacturer, MPN
+    
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        sch_path: Optional path to the .kicad_sch file.
+        output_dir: Optional destination directory (defaults to <project>/production/).
+    """
+    return _generate_pcbway_assembly(
+        pcb_path=pcb_path,
+        sch_path=sch_path,
+        output_dir=output_dir,
     )
 
 
