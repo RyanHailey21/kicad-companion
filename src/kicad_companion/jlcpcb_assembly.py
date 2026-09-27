@@ -267,7 +267,7 @@ def generate_jlcpcb_assembly(
                 continue
 
             # Skip through-hole components from SMT placement
-            if ref in tht_footprints or "PINHEADER" in pkg.upper() or "THROUGH_HOLE" in pkg.upper() or ref.startswith("J_"):
+            if ref in tht_footprints or "THROUGH_HOLE" in pkg.upper() or ref.startswith("J_"):
                 skipped_components.append({"reference": ref, "reason": "Through-Hole Component"})
                 continue
 
@@ -499,6 +499,7 @@ def generate_pcbway_assembly(
             )
             m_mfg = re.search(r'\(property\s+"(?:Manufacturer|MFG)"\s+"([^"]+)"', sb, re.I)
             is_dnp = "(dnp yes)" in sb
+            has_mpn_field = bool(re.search(r'\(property\s+"(?:MPN|Manufacturer Part Number|Part Number)"\s+"[^"]+"', sb, re.I))
 
             if m_ref:
                 ref = m_ref.group(1)
@@ -507,11 +508,13 @@ def generate_pcbway_assembly(
                     "footprint": m_fp.group(1) if m_fp else "",
                     "mpn": m_mpn.group(1) if m_mpn else "",
                     "mfg": m_mfg.group(1) if m_mfg else "",
+                    "has_mpn_field": has_mpn_field,
                     "dnp": is_dnp,
                 }
 
     # 4. Filter and process SMD placements for PCBWay CPL
     smd_components = []
+    tht_components = []   # hand/wave-soldered by the assembler: BOM only, no CPL row
     with open(raw_cpl, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -525,7 +528,9 @@ def generate_pcbway_assembly(
 
             if any(ref.upper().startswith(p) for p in ["H", "TP", "FID", "LOGO", "REF", "G"]):
                 continue
-            if ref in tht_footprints or "PINHEADER" in pkg.upper() or ref.startswith("J_"):
+            if ref in tht_footprints or ref.startswith("J_"):
+                if ref in tht_footprints and not sch_components.get(ref, {}).get("dnp", False):
+                    tht_components.append({"ref": ref, "val": val, "pkg": pkg})
                 continue
             if sch_components.get(ref, {}).get("dnp", False):
                 continue
@@ -551,20 +556,27 @@ def generate_pcbway_assembly(
             y_str = f"{c['y']:.6f}".rstrip('0').rstrip('.') if '.' in f"{c['y']:.6f}" else f"{c['y']:.6f}"
             writer.writerow([c["ref"], f"{c['x']:.6f}", y_str, c["layer"], f"{c['rot']:.6f}"])
 
-    # 5. Build PCBWay BOM
+    # 5. Build PCBWay BOM (SMT + through-hole; THT parts are soldered by the assembler, no CPL row)
     bom_groups = {}
-    for c in smd_components:
+    for c in smd_components + [dict(t, tht=True) for t in tht_components]:
         ref = c["ref"]
         val = c["val"]
         pkg = c["pkg"]
         clean_fp = pkg.split(":")[-1] if ":" in pkg else pkg
+        if c.get("tht"):
+            clean_fp += " (THT)"
 
-        # Determine Manufacturer and MPN
+        # Manufacturer and MPN come from the schematic fields. The legacy table below is only a
+        # fallback for parts without an MPN field: it names specific packages (SOIC, SOT-23...)
+        # that may not match the footprint, so it must never override a real MPN.
         mfg = sch_components.get(ref, {}).get("mfg", "")
         mpn = sch_components.get(ref, {}).get("mpn", "") or val
+        has_mpn = sch_components.get(ref, {}).get("has_mpn_field", False)
 
         val_upper = val.upper()
-        if "OPA381" in val_upper:
+        if has_mpn:
+            pass
+        elif "OPA381" in val_upper:
             mfg, mpn = "Texas Instruments", "OPA381AIDGKT"
         elif "TLV3202" in val_upper:
             mfg, mpn = "Texas Instruments", "TLV3202AIDR"
@@ -605,9 +617,12 @@ def generate_pcbway_assembly(
         "cpl_file": str(pcbway_cpl_file),
         "bom_file": str(pcbway_bom_file),
         "smd_component_count": len(smd_components),
+        "tht_components": [t["ref"] for t in tht_components],
+        "dnp_components": sorted(r for r, v in sch_components.items() if v.get("dnp")),
         "bom_line_items": len(bom_groups),
         "summary": (
             f"PCBWay assembly files generated: {len(smd_components)} SMD placements in {pcbway_cpl_file.name}, "
+            f"{len(tht_components)} through-hole parts (BOM only), "
             f"{len(bom_groups)} grouped BOM lines in {pcbway_bom_file.name} with Manufacturer & MPN specifications."
         ),
     }

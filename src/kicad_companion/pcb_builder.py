@@ -16,9 +16,11 @@ pcb = ARGS["pcb"]
 if os.path.exists(pcb):
     os.remove(pcb)
 board = pcbnew.NewBoard(pcb)
+board.SetCopperLayerCount(ARGS["copper_layers"])
 ds = board.GetDesignSettings()
 for k, v in ARGS["rules"].items():
     setattr(ds, k, mm(v))
+ds.m_AllowSoldermaskBridgesInFPs = ARGS["mask_bridges_in_fps"]
 nets = {}
 def net(name):
     if name not in nets:
@@ -60,6 +62,62 @@ rect.SetEnd(pcbnew.VECTOR2I(mm(X0 + W), mm(Y0 + H)))
 rect.SetLayer(pcbnew.Edge_Cuts)
 rect.SetWidth(mm(0.1))
 board.Add(rect)
+def outline_zone(z, pts):
+    o = z.Outline()
+    o.NewOutline()
+    for x, y in pts:
+        o.Append(mm(x), mm(y))
+# inner planes: power-type layer + full-board zone, so the autorouter treats it as a plane
+for lname, netname in ARGS["planes"].items():
+    lid = board.GetLayerID(lname)
+    board.SetLayerType(lid, pcbnew.LT_POWER)
+    z = pcbnew.ZONE(board)
+    z.SetLayer(lid)
+    z.SetNet(net(netname))
+    z.SetLocalClearance(mm(0.3))
+    z.SetMinThickness(mm(0.25))
+    z.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
+    outline_zone(z, [(X0 + 0.4, Y0 + 0.4), (X0 + W - 0.4, Y0 + 0.4), (X0 + W - 0.4, Y0 + H - 0.4), (X0 + 0.4, Y0 + H - 0.4)])
+    board.Add(z)
+layer_ids = {board.GetLayerName(l): l for l in board.GetEnabledLayers().Seq()}
+for k in ARGS["keepouts"]:
+    if not k.get("rule_area"):
+        continue
+    x0, y0, x1, y1 = k["rect"]
+    z = pcbnew.ZONE(board)
+    z.SetIsRuleArea(True)
+    z.SetLayer(pcbnew.F_Cu if k.get("side", "F") != "B" else pcbnew.B_Cu)
+    z.SetDoNotAllowFootprints(True)
+    z.SetDoNotAllowTracks(False); z.SetDoNotAllowVias(False); z.SetDoNotAllowPads(False); z.SetDoNotAllowZoneFills(False)
+    outline_zone(z, [(X0 + x0, Y0 + y0), (X0 + x1, Y0 + y0), (X0 + x1, Y0 + y1), (X0 + x0, Y0 + y1)])
+    board.Add(z)
+for g in ARGS["graphics"]:
+    layer = layer_ids.get(g.get("layer", "F.SilkS"), pcbnew.F_SilkS)
+    if "rect" in g:
+        sh = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_RECT)
+        x0, y0, x1, y1 = g["rect"]
+        sh.SetStart(pcbnew.VECTOR2I(mm(X0 + x0), mm(Y0 + y0))); sh.SetEnd(pcbnew.VECTOR2I(mm(X0 + x1), mm(Y0 + y1)))
+    elif "circle" in g:
+        sh = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_CIRCLE)
+        cx, cy, r = g["circle"]
+        sh.SetCenter(pcbnew.VECTOR2I(mm(X0 + cx), mm(Y0 + cy))); sh.SetEnd(pcbnew.VECTOR2I(mm(X0 + cx + r), mm(Y0 + cy)))
+    elif "line" in g:
+        sh = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_SEGMENT)
+        x0, y0, x1, y1 = g["line"]
+        sh.SetStart(pcbnew.VECTOR2I(mm(X0 + x0), mm(Y0 + y0))); sh.SetEnd(pcbnew.VECTOR2I(mm(X0 + x1), mm(Y0 + y1)))
+    elif "text" in g:
+        sh = pcbnew.PCB_TEXT(board)
+        sh.SetText(g["text"]); x, y = g["at"]
+        sh.SetPosition(pcbnew.VECTOR2I(mm(X0 + x), mm(Y0 + y)))
+        sz = mm(g.get("size", 0.8)); sh.SetTextSize(pcbnew.VECTOR2I(sz, sz)); sh.SetTextThickness(mm(0.15))
+        if layer in (pcbnew.B_SilkS, pcbnew.B_Fab):
+            sh.SetMirrored(True)
+    else:
+        continue
+    sh.SetLayer(layer)
+    if hasattr(sh, "SetWidth") and "text" not in g:
+        sh.SetWidth(mm(g.get("width", 0.12)))
+    board.Add(sh)
 board.Save(pcb)
 emit({"footprints": col, "nets": len(nets), "missing_footprints": missing})
 '''
@@ -121,7 +179,21 @@ def build_pcb_from_schematic(
     regions: Optional[List[Dict[str, Any]]] = None,
     auto_place_rest: bool = True,
     gap_mm: float = 0.8,
+    copper_layers: int = 2,
+    planes: Optional[Dict[str, str]] = None,
+    keepouts: Optional[List[Dict[str, Any]]] = None,
+    graphics: Optional[List[Dict[str, Any]]] = None,
+    auto_sides: Optional[List[str]] = None,
+    step_mm: float = 0.25,
+    margin_mm: float = 1.0,
+    allow_soldermask_bridges_in_footprints: bool = True,
+    routing_halo: Any = "auto",
+    target_utilization: float = 0.8,
+    spread_weight_mm: float = 6.0,
     overwrite: bool = False,
+    groups: Optional[List[Dict[str, Any]]] = None,
+    group_pull: float = 0.35,
+    near: Optional[Dict[str, str]] = None,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
     """Build a fresh, placed (unrouted) board from the schematic netlist.
@@ -135,7 +207,19 @@ def build_pcb_from_schematic(
         sch_path: Root .kicad_sch.
         pcb_path: Output .kicad_pcb (defaults to the sibling of the schematic).
         board_width_mm / board_height_mm: Outline size. origin_mm: outline top-left (default [100, 100]).
-        fixed / regions / auto_place_rest / gap_mm: see place_footprints (board-relative mm).
+        fixed / regions / auto_place_rest / gap_mm / keepouts / auto_sides: see place_footprints
+            (board-relative mm; fixed entries may carry a 4th element "B" for the back side).
+        margin_mm: Keep-in margin from the outline for auto-placed parts.
+        allow_soldermask_bridges_in_footprints: Fine-pitch parts (0.5 mm QFN/VSSOP, 0201) normally
+            have merged mask openings between their own pads; don't flag those.
+        routing_halo / target_utilization: see place_footprints; "auto" spreads parts over the
+            board so routing channels scale with board size.
+        copper_layers: 2, 4, 6 ...
+        planes: Inner plane layers, e.g. {"In1.Cu": "GND"}; the layer is made a power layer with a
+            full-board zone so the autorouter drops vias into it instead of routing the net.
+        keepouts: Also accept "rule_area": true to add a KiCad no-footprints rule area DRC enforces.
+        graphics: [{"layer": "F.SilkS", "rect"|"circle"|"line": [...], "width": 0.12} |
+            {"layer": ..., "text": "...", "at": [x, y], "size": 0.8}] in board-relative mm.
         overwrite: Replace a board that already has footprints.
     """
     s_path = Path(sch_path).resolve()
@@ -168,10 +252,21 @@ def build_pcb_from_schematic(
                                    "m_ViasMinSize": r.get("min_via_diameter_mm"),
                                    "m_MinThroughDrill": r.get("min_via_drill_mm")}.items() if v}
     origin = origin_mm or [100.0, 100.0]
+    # plane nets must exist under their exact schematic names
+    names = {n for n in netlist["nets"]}
+    plane_nets = {}
+    for layer, n in (planes or {}).items():
+        plane_nets[layer] = n if n in names else ("/" + n if "/" + n in names else n)
     built = run_pcbnew(_BUILD_JOB, {"pcb": str(p_path), "components": comps, "origin": origin,
-                                    "width": board_width_mm, "height": board_height_mm, "rules": rules})
+                                    "width": board_width_mm, "height": board_height_mm, "rules": rules,
+                                    "copper_layers": copper_layers, "planes": plane_nets,
+                                    "keepouts": keepouts or [], "graphics": graphics or [],
+                                    "mask_bridges_in_fps": allow_soldermask_bridges_in_footprints})
     placed = place_footprints(str(p_path), fixed=fixed, regions=regions, auto_place_rest=auto_place_rest,
-                              gap_mm=gap_mm, allow_while_open=allow_while_open)
+                              gap_mm=gap_mm, step_mm=step_mm, margin_mm=margin_mm, keepouts=keepouts, auto_sides=auto_sides,
+                              routing_halo=routing_halo, target_utilization=target_utilization,
+                              spread_weight_mm=spread_weight_mm, groups=groups, group_pull=group_pull, near=near,
+                              allow_while_open=allow_while_open)
     return {
         "status": "success" if not (built["missing_footprints"] or no_fp or placed["overflow"]) else "partial",
         "pcb_file": str(p_path),
@@ -179,7 +274,8 @@ def build_pcb_from_schematic(
         "nets": built["nets"],
         "missing_footprints": built["missing_footprints"],
         "symbols_without_footprint": no_fp,
-        "placement": {k: placed[k] for k in ("placed", "overflow", "unplaced", "placement_score", "is_pass",
+        "copper_layers": copper_layers,
+        "placement": {k: placed[k] for k in ("placed", "overflow", "unplaced", "back_side", "placement_score", "is_pass",
                                               "edge_violations", "overlaps", "drc_courtyard_violations")},
         "next_steps": "configure_netclasses -> autoroute_board -> finalize_pcb -> sanitize_silkscreen -> triage_pcb_drc(schematic_parity=True)",
     }

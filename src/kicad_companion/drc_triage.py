@@ -133,8 +133,11 @@ def triage_pcb_drc(
 
     # Group unconnected items by Net if available in descriptions
     net_unconnected: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    pour_islands = 0   # zone-to-zone pairs: KiCad reports the zone's first corner, not the island
     for u in unconnected_items:
         items = u.get("items", [])
+        if items and all(it.get("description", "").startswith("Zone ") for it in items):
+            pour_islands += 1
         desc = u.get("description", "")
         for it in items:
             it_desc = it.get("description", "")
@@ -158,6 +161,20 @@ def triage_pcb_drc(
         top_nets = sorted(net_unconnected.keys(), key=lambda k: len(net_unconnected[k]), reverse=True)[:5]
         top_summary = ", ".join([f"{n} ({len(net_unconnected[n])} pins)" for n in top_nets])
         remediations.append(f"Route major unconnected nets: {top_summary}.")
+    if pour_islands:
+        remediations.append(
+            f"{pour_islands} unconnected item(s) are copper-pour islands (zone-to-zone; the reported "
+            "position is only the zone's corner). Run finalize_pcb (island_vias=True): it ties them with "
+            "a via or short track and lists any it cannot fix with their stranded pads. Next time, run "
+            "fanout_vias before autorouting.")
+    narrow = sorted({it.get("description", "").split("[")[1].split("]")[0]
+                     for e in critical_errors if e.get("type") == "track_width"
+                     for it in e.get("items", []) if "[" in it.get("description", "")})
+    if narrow:
+        remediations.append(
+            f"Tracks below the minimum width on {', '.join(narrow)}: Freerouting necks tracks down to squeeze "
+            "between fine-pitch pins (it can ignore the neckdown setting). Reroute those short segments around "
+            "the pin row by hand, give the IC more room, or lower min_track_width only if the fab supports it.")
     if footprint_internal:
         remediations.append(f"Footprint-internal pad spacing violates clearance on: {', '.join(sorted(set(footprint_internal)))}.")
     if parity_items:
@@ -188,6 +205,7 @@ def triage_pcb_drc(
         "board": str(p_path),
         "total_violations": len(violations),
         "total_unconnected": len(unconnected_items),
+        "pour_island_items": pour_islands,
         "summary_markdown": "\n".join(summary_lines),
         "critical_errors": critical_errors[:max_items_per_group],
         "fab_hazards": fab_hazards[:max_items_per_group],

@@ -8,11 +8,13 @@ Compatible with **Antigravity**, **Claude (Desktop & Code)**, and **OpenAI Codex
 
 ## Capabilities
 
-0. **Headless Design Pipeline (`generate_schematic`, `build_pcb_from_schematic`, `place_footprints`, `configure_netclasses`, `finalize_pcb`)**:
+0. **Headless Design Pipeline (`generate_schematic`, `create_derived_symbol`, `build_pcb_from_schematic`, `place_footprints`, `configure_netclasses`, `fanout_vias`, `finalize_pcb`)**:
    - Builds a complete schematic from a JSON parts/nets spec (official-library symbols, all units, automatic PWR_FLAGs, ERC summary); symbol UUIDs stay stable across regenerations.
-   - Creates a placed, schematic-linked PCB without the GUI: footprints from stock and fp-lib-table libraries, exact KiCad net names, outline, plan-driven placement on exact courtyards.
+   - Creates a placed, schematic-linked PCB without the GUI: footprints from stock and fp-lib-table libraries, exact KiCad net names, outline, 2-6+ copper layers with inner planes, keep-outs and graphics.
+   - Floorplanned, electrically aware placement on one or both sides: functional `groups` confined to their own areas, decoupling caps anchored at their IC's supply pin, `near` rules for feedback/timing parts, per-group routing halos and a crowding penalty that spreads parts over the whole board.
+   - `fanout_vias` reserves a via + dogbone for every SMD pad on a plane net before autorouting (no via-in-pad), so ground pads never end up walled in.
    - Net classes that match KiCad's sheet-prefixed net names (`/GND`), merged non-destructively.
-   - Post-route finishing: re-link to the schematic, GND pours on both layers, zone fill.
+   - Post-route finishing: re-link to the schematic, GND pours, zone fill, and a via / bridge / maze-routed track only where a pour island is actually disconnected (no stitching grid unless asked); reports any stranded pads it cannot fix.
    - All board edits go through KiCad's own `pcbnew` Python, and every writing tool refuses to run while KiCad has the project open (KiCad would overwrite the changes on exit; see `check_project_open`).
 
 1. **Project Intent Governance (`ensure_project_context`)**:

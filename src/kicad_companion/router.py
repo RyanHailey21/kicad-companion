@@ -55,6 +55,7 @@ def run_freerouting(
     output_ses: Optional[str] = None,
     passes: int = 15,
     single_threaded: bool = True,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Run Freerouting in headless batch mode.
 
@@ -63,6 +64,9 @@ def run_freerouting(
         output_ses: Optional path for the output .ses file.
         passes: Maximum autorouting passes. Default 15.
         single_threaded: Force '-mt 1' to avoid multi-threaded route optimizer bugs. Default True.
+        settings: Per-run Freerouting setting overrides, e.g. {"router.automatic_neckdown": False}.
+            Passed as FREEROUTING__SECTION__KEY environment variables, so the user's global
+            freerouting.json is left untouched.
 
     Returns:
         Absolute path to the resulting .ses file.
@@ -94,9 +98,13 @@ def run_freerouting(
     print(f"Executing Freerouting: {' '.join(cmd)}", file=sys.stderr)
     print(f"Streaming live progress to console and {log_path} ...", file=sys.stderr, flush=True)
 
+    env = dict(os.environ)
+    for key, val in (settings or {}).items():
+        env["FREEROUTING__" + key.replace(".", "__").upper()] = str(val).lower() if isinstance(val, bool) else str(val)
     with open(log_path, "w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             cmd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -116,6 +124,21 @@ def run_freerouting(
         raise RuntimeError(f"Freerouting failed (code {proc.returncode}):\n{err_msg}")
 
     return str(ses_path)
+
+
+def _item_signature(text: str):
+    """Geometry key of a (segment ...) or (via ...) s-expression, for de-duplication."""
+    if text.lstrip().startswith("(via"):
+        m = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", text)
+        return ("via", round(float(m.group(1)), 3), round(float(m.group(2)), 3)) if m else None
+    a = re.search(r"\(start\s+([-\d.]+)\s+([-\d.]+)\)", text)
+    b = re.search(r"\(end\s+([-\d.]+)\s+([-\d.]+)\)", text)
+    lay = re.search(r'\(layer\s+"([^"]+)"\)', text)
+    if not (a and b and lay):
+        return None
+    p1 = (round(float(a.group(1)), 3), round(float(a.group(2)), 3))
+    p2 = (round(float(b.group(1)), 3), round(float(b.group(2)), 3))
+    return ("seg", lay.group(1)) + tuple(sorted((p1, p2)))
 
 
 def import_specctra_ses(
@@ -189,7 +212,8 @@ def import_specctra_ses(
         # 1. Wires: (wire (path LAYER WIDTH X1 Y1 X2 Y2 ...))
         wire_matches = re.findall(r"\(wire\s+\(path\s+(\S+)\s+(\d+)\s+([-\d\s]+?)\)", chunk, re.DOTALL)
         for layer, width_units, pts_str in wire_matches:
-            w_mm = max(round(float(width_units) * scale, 4), 0.15)
+            # keep the routed width exactly; widening tracks here eats into the clearance Freerouting left
+            w_mm = round(float(width_units) * scale, 4)
             pts = [float(x) for x in pts_str.split()]
             coords = []
             for i in range(0, len(pts), 2):
@@ -216,25 +240,36 @@ def import_specctra_ses(
                 f'\t(via (at {vx_mm} {vy_mm}) (size {size_mm}) (drill {drill_mm}) (layers "F.Cu" "B.Cu") {net_ref(net_name)} (uuid "{u}"))'
             )
 
-    # Remove existing tracks and vias from pcb_content using paren counting
+    # Remove existing tracks and vias from pcb_content using paren counting. Locked items
+    # (e.g. fanout_vias stubs and vias) are kept verbatim, lock included, and the copies
+    # Freerouting writes back for them are dropped.
     lines = pcb_content.splitlines(keepends=True)
     clean_lines = []
-    skip = False
+    block = []
     parens = 0
+    locked_sigs = set()
     for line in lines:
-        if not skip:
-            if line.startswith("\t(segment") or line.startswith("\t(via"):
-                skip = True
-                parens = line.count("(") - line.count(")")
-                if parens <= 0:
-                    skip = False
-            else:
+        if not block:
+            if not (line.startswith("\t(segment") or line.startswith("\t(via")):
                 clean_lines.append(line)
+                continue
+            block = [line]
+            parens = line.count("(") - line.count(")")
         else:
+            block.append(line)
             parens += line.count("(") - line.count(")")
-            if parens <= 0:
-                skip = False
+        if parens <= 0:
+            text = "".join(block)
+            if "(locked yes)" in text:
+                clean_lines.append(text)
+                sig = _item_signature(text)
+                if sig:
+                    locked_sigs.add(sig)
+            block = []
     pcb_content = "".join(clean_lines)
+    if locked_sigs:
+        track_lines = [t for t in track_lines if _item_signature(t) not in locked_sigs]
+        via_lines = [v for v in via_lines if _item_signature(v) not in locked_sigs]
 
     # Insert new tracks and vias before the final closing ')'
     elements = track_lines + via_lines
@@ -248,34 +283,58 @@ def import_specctra_ses(
         "total_segments": len(track_lines),
         "total_vias": len(via_lines),
         "routed_nets_count": len(routed_nets),
+        "locked_items_kept": len(locked_sigs),
     }
 
 
 def autoroute_board(
     pcb_path: str,
     passes: int = 15,
+    rounds: int = 1,
+    neckdown: bool = False,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
     """Execute end-to-end autorouting: export DSN -> run Freerouting -> import SES -> run DRC.
 
     Args:
         pcb_path: Path to the .kicad_pcb file.
-        passes: Maximum autorouting passes. Default 15.
+        passes: Maximum autorouting passes per round. Default 15.
+        rounds: If nets remain unrouted, re-export the partly routed board and route again
+            (Freerouting keeps the existing wiring), up to this many rounds. The best result
+            (fewest unconnected, then fewest DRC errors) is kept.
+        neckdown: Allow Freerouting to narrow tracks below the net-class width near fine-pitch
+            pads. Off by default so tracks never fall under the board's minimum width.
 
     Returns:
-        Dict with routing metrics, track/via counts, and DRC triage summary.
+        Dict with routing metrics, track/via counts, per-round history and DRC triage summary.
     """
+    import shutil
     p_path = Path(pcb_path).resolve()
     guard_headless_write(str(p_path), allow_while_open)
-    dsn_path = export_specctra_dsn(str(p_path))
-    ses_path = run_freerouting(dsn_path, passes=passes, single_threaded=True)
-    import_res = import_specctra_ses(str(p_path), ses_path, allow_while_open=allow_while_open)
-    drc_res = triage_pcb_drc(str(p_path), refill_zones=True)
-    for tmp in (dsn_path, ses_path):
-        Path(tmp).unlink(missing_ok=True)
-
+    settings = {"router.automatic_neckdown": bool(neckdown)}
+    best = None
+    history = []
+    backup = p_path.with_suffix(".kicad_pcb.route_best")
+    for rnd in range(max(1, rounds)):
+        dsn_path = export_specctra_dsn(str(p_path))
+        ses_path = run_freerouting(dsn_path, passes=passes, single_threaded=True, settings=settings)
+        import_res = import_specctra_ses(str(p_path), ses_path, allow_while_open=allow_while_open)
+        drc_res = triage_pcb_drc(str(p_path), refill_zones=True)
+        for tmp in (dsn_path, ses_path):
+            Path(tmp).unlink(missing_ok=True)
+        key = (drc_res["total_unconnected"], len(drc_res["critical_errors"]))
+        history.append({"round": rnd + 1, "unconnected": key[0], "critical": key[1],
+                        "segments": import_res["total_segments"], "vias": import_res["total_vias"]})
+        if best is None or key < best[0]:
+            best = (key, import_res, drc_res)
+            shutil.copyfile(p_path, backup)
+        if key[0] == 0:
+            break
+    shutil.copyfile(backup, p_path)
+    backup.unlink(missing_ok=True)
     return {
-        "status": "success",
-        "routing": import_res,
-        "drc": drc_res,
+        "status": "success" if best[0][0] == 0 else "partial",
+        "routing": best[1],
+        "drc": best[2],
+        "rounds": history,
     }

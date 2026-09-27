@@ -17,6 +17,8 @@ from .schematic_builder import generate_schematic as _generate_schematic
 from .schematic_builder import run_schematic_erc as _run_schematic_erc
 from .pcb_builder import build_pcb_from_schematic as _build_pcb_from_schematic
 from .finalize import finalize_pcb as _finalize_pcb
+from .fanout import fanout_vias as _fanout_vias
+from .symbols import create_derived_symbol as _create_derived_symbol
 from .router import (
     autoroute_board as _autoroute_board,
     export_specctra_dsn as _export_specctra_dsn,
@@ -144,6 +146,35 @@ def generate_schematic(
 
 
 @server.tool()
+def create_derived_symbol(
+    project_path: str,
+    base_lib_id: str,
+    new_name: str,
+    add_pins: List[Dict[str, Any]],
+    library: Optional[str] = None,
+    properties: Optional[Dict[str, str]] = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Copy a library symbol into the project library under a new name with extra pins.
+
+    Use it when a footprint has a pad the stock symbol lacks (e.g. an exposed thermal pad that
+    the datasheet says must connect to V-). The library is created and registered in the
+    project sym-lib-table if needed, and generate_schematic resolves it automatically.
+
+    Args:
+        project_path: Any path in the project.
+        base_lib_id: e.g. "Amplifier_Operational:MCP6022".
+        new_name: e.g. "OPA2381_DRB".
+        add_pins: [{"number": "9", "name": "EP", "type": "passive", "like": "4", "dx": 2.54}].
+        library: Project library nickname (default: project name).
+        properties: Property overrides such as {"Footprint": "..."}.
+        overwrite: Replace an existing symbol with the same name.
+    """
+    return _create_derived_symbol(project_path=project_path, base_lib_id=base_lib_id, new_name=new_name,
+                                  add_pins=add_pins, library=library, properties=properties, overwrite=overwrite)
+
+
+@server.tool()
 def run_erc(sch_path: str, max_items: int = 15) -> Dict[str, Any]:
     """Run KiCad ERC headlessly and summarise violations by type.
 
@@ -165,6 +196,17 @@ def build_pcb_from_schematic(
     regions: Optional[List[Dict[str, Any]]] = None,
     auto_place_rest: bool = True,
     gap_mm: float = 0.8,
+    copper_layers: int = 2,
+    planes: Optional[Dict[str, str]] = None,
+    keepouts: Optional[List[Dict[str, Any]]] = None,
+    graphics: Optional[List[Dict[str, Any]]] = None,
+    auto_sides: Optional[List[str]] = None,
+    margin_mm: float = 1.0,
+    routing_halo: Any = "auto",
+    target_utilization: float = 0.8,
+    spread_weight_mm: float = 6.0,
+    groups: Optional[List[Dict[str, Any]]] = None,
+    near: Optional[Dict[str, str]] = None,
     overwrite: bool = False,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
@@ -178,16 +220,33 @@ def build_pcb_from_schematic(
         sch_path: Root schematic.
         pcb_path: Output board (default: sibling .kicad_pcb).
         board_width_mm / board_height_mm: Outline size; origin_mm is its top-left (default [100, 100]).
-        fixed: {ref: [cx, cy, rot]} courtyard-centre positions, board-relative mm.
-        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0}], first-fit packed in order.
+        fixed: {ref: [cx, cy, rot, side]} courtyard-centre positions, board-relative mm; side "F"/"B".
+        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "side": "B"}], packed in order.
         auto_place_rest: Pack all remaining parts into free board area.
         gap_mm: Courtyard gap.
+        copper_layers: 2, 4, 6...
+        planes: Inner planes, e.g. {"In1.Cu": "GND"} (power layer + zone; autorouter vias into it).
+        keepouts: [{"rect": [...], "side": "F"|"B"|"both", "rule_area": false}] kept free of packed parts.
+        graphics: Silk/Fab/User shapes and text, e.g. a lens-holder outline (board-relative mm).
+        auto_sides: Sides tried for auto-placed parts, e.g. ["B", "F"] for double-sided assembly.
+        margin_mm: Keep-in margin from the outline for auto-placed parts.
+        routing_halo: Routing clearance around auto-placed parts (mm, pin-count scaled); "auto" spreads
+            parts to target_utilization of the free area so extra board area becomes routing space.
+        spread_weight_mm: Crowding penalty that pulls parts into empty board regions (0 = off).
+        groups: Functional groups [{"refs": [...], "rect": [x0, y0, x1, y1], "sides": ["B"], "target": [x, y]}]:
+            members are placed by connectivity but confined to their rect/sides; decoupling caps stay
+            with an IC of their own group.
+        near: {ref: target_ref} proximity rules (feedback/timing parts next to the pin they serve).
         overwrite: Rebuild a board that already has footprints.
     """
     return _build_pcb_from_schematic(sch_path=sch_path, pcb_path=pcb_path, board_width_mm=board_width_mm,
                                      board_height_mm=board_height_mm, origin_mm=origin_mm, fixed=fixed,
                                      regions=regions, auto_place_rest=auto_place_rest, gap_mm=gap_mm,
-                                     overwrite=overwrite, allow_while_open=allow_while_open)
+                                     copper_layers=copper_layers, planes=planes, keepouts=keepouts,
+                                     graphics=graphics, auto_sides=auto_sides, margin_mm=margin_mm,
+                                     routing_halo=routing_halo, target_utilization=target_utilization,
+                                     spread_weight_mm=spread_weight_mm, groups=groups, near=near, overwrite=overwrite,
+                                     allow_while_open=allow_while_open)
 
 
 @server.tool()
@@ -199,22 +258,32 @@ def place_footprints(
     auto_place_rest: bool = False,
     gap_mm: float = 0.8,
     relative_to_outline: bool = True,
+    keepouts: Optional[List[Dict[str, Any]]] = None,
+    auto_sides: Optional[List[str]] = None,
+    groups: Optional[List[Dict[str, Any]]] = None,
+    near: Optional[Dict[str, str]] = None,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
-    """Place footprints from a plan using exact courtyards (fixed positions + packing regions).
+    """Place footprints from a plan using exact courtyards (fixed positions + packing regions), either side.
 
     Args:
         pcb_path: Board to modify.
-        fixed: {ref: [cx, cy, rot]} courtyard-centre positions (mm).
-        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "rotations": {ref: deg}}].
+        fixed: {ref: [cx, cy, rot, side]} courtyard-centre positions (mm); side "F" (default) or "B".
+        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "rotations": {ref: deg}, "side": "F"}].
         keep_refs: Parts to leave in place but treat as obstacles.
         auto_place_rest: Also pack every part not mentioned into free board area.
         gap_mm: Courtyard-to-courtyard gap.
         relative_to_outline: Coordinates relative to the outline's top-left corner.
+        keepouts: [{"rect": [x0, y0, x1, y1], "side": "F"|"B"|"both"}] areas left empty.
+        auto_sides: Sides tried for auto-placed parts, in order (default ["F"]).
+        groups: Functional groups for auto placement: [{"refs": [...], "rect": [...], "sides": ["B"],
+            "target": [x, y]}] (members confined to their rect/sides, placed by connectivity).
+        near: {ref: target_ref} proximity rules (feedback/timing parts next to the pin they serve).
     """
     return _place_footprints(pcb_path=pcb_path, fixed=fixed, regions=regions, keep_refs=keep_refs,
                              auto_place_rest=auto_place_rest, gap_mm=gap_mm,
-                             relative_to_outline=relative_to_outline, allow_while_open=allow_while_open)
+                             relative_to_outline=relative_to_outline, keepouts=keepouts,
+                             auto_sides=auto_sides, groups=groups, near=near, allow_while_open=allow_while_open)
 
 
 @server.tool()
@@ -255,7 +324,15 @@ def finalize_pcb(
     pour_net: Optional[str] = "GND",
     pour_layers: Optional[List[str]] = None,
     clearance_mm: float = 0.4,
+    min_width_mm: float = 0.3,
     thermal_reliefs: bool = True,
+    thermal_gap_mm: float = 0.3,
+    spoke_width_mm: float = 0.4,
+    stitch_pitch_mm: float = 0.0,
+    island_vias: bool = True,
+    bridge_islands: bool = True,
+    via_diameter_mm: float = 0.5,
+    via_drill_mm: float = 0.3,
     relink: bool = True,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
@@ -266,12 +343,25 @@ def finalize_pcb(
         sch_path: Schematic (default sibling).
         pour_net: Pour net ('GND' also matches '/GND'); null to skip pours.
         pour_layers: Default ['F.Cu', 'B.Cu'].
-        clearance_mm: Zone clearance.
-        thermal_reliefs: Thermal spokes (easier hand soldering) vs solid connection.
+        clearance_mm / min_width_mm: Zone clearance and minimum fill width (fine-pitch boards:
+            about 0.15 / 0.15 so the pour reaches between pads).
+        thermal_reliefs / thermal_gap_mm / spoke_width_mm: Thermal spokes vs solid connection.
+        stitch_pitch_mm: Optional stitching-via grid (0 = off, the default; a grid adds hundreds
+            of vias the design rarely needs).
+        island_vias: Tie every pour fragment that is not already connected (no via inside, no
+            touching pad routed to a via) with one via, else a bridge track to a nearby via, else a
+            short maze-routed track to a new via. Islands that still fail are returned in
+            pours.islands_without_via with the stranded pads: fix those by hand (move a wall track
+            ~0.3 mm and drop a via beside the pad) or run fanout_vias before routing next time.
+        bridge_islands: Allow the bridge/maze tracks above.
+        via_diameter_mm / via_drill_mm: Size of vias added for islands.
         relink: Sync symbol links, values, fields and NC nets from the schematic first.
     """
     return _finalize_pcb(pcb_path=pcb_path, sch_path=sch_path, pour_net=pour_net, pour_layers=pour_layers,
-                         clearance_mm=clearance_mm, thermal_reliefs=thermal_reliefs, relink=relink,
+                         clearance_mm=clearance_mm, min_width_mm=min_width_mm, thermal_reliefs=thermal_reliefs,
+                         thermal_gap_mm=thermal_gap_mm, spoke_width_mm=spoke_width_mm, relink=relink,
+                         stitch_pitch_mm=stitch_pitch_mm, island_vias=island_vias, bridge_islands=bridge_islands,
+                         via_diameter_mm=via_diameter_mm, via_drill_mm=via_drill_mm,
                          allow_while_open=allow_while_open)
 
 
@@ -442,18 +532,62 @@ def export_specctra_dsn(
 def autoroute_board(
     pcb_path: str,
     passes: int = 15,
+    rounds: int = 1,
+    neckdown: bool = False,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
     """Headless autorouting with Freerouting: DSN export -> route -> SES import -> DRC triage.
 
     Uses single-threaded optimization (-mt 1) to avoid Freerouting clearance bugs. Track widths
-    and clearances come from the net classes, so run configure_netclasses first.
+    and clearances come from the net classes, so run configure_netclasses first. On boards with
+    inner planes, run fanout_vias first so plane pads keep a via.
+
+    Judge the result by the returned KiCad DRC counts (drc.total_unconnected), never by
+    Freerouting's log: its "unrouted items" counts net fragments and restarts high on a partly
+    routed board. Extra rounds rarely help; if a region stays congested, fix the placement.
 
     Args:
         pcb_path: Path to the .kicad_pcb file.
-        passes: Maximum autorouting passes. Default 15.
+        passes: Maximum autorouting passes per round. Default 15.
+        rounds: Re-route from the partly routed board while nets remain unrouted (best kept).
+        neckdown: Let Freerouting narrow tracks below class width at fine-pitch pads (off by default).
     """
-    return _autoroute_board(pcb_path=pcb_path, passes=passes, allow_while_open=allow_while_open)
+    return _autoroute_board(pcb_path=pcb_path, passes=passes, rounds=rounds, neckdown=neckdown,
+                            allow_while_open=allow_while_open)
+
+
+@server.tool()
+def fanout_vias(
+    pcb_path: str,
+    nets: Optional[List[str]] = None,
+    via_diameter_mm: float = 0.5,
+    via_drill_mm: float = 0.3,
+    stub_width_mm: float = 0.2,
+    max_distance_mm: float = 1.5,
+    share_mm: float = 1.2,
+    lock: bool = True,
+    allow_while_open: bool = False,
+) -> Dict[str, Any]:
+    """Pre-route fanout: give every SMD pad on a plane net its own via + short dogbone stub.
+
+    Run between placement and autoroute_board on any board with inner planes. Autorouters treat
+    plane connections as ordinary work items; the ones that lose the race get boxed in by signal
+    tracks and their pour becomes an unreachable island. Reserving the via first prevents that.
+
+    Args:
+        pcb_path: Placed board.
+        nets: Nets to fan out; default = nets owning a zone on a power (plane) layer.
+        via_diameter_mm / via_drill_mm / stub_width_mm: Via and stub size.
+        max_distance_mm: Max via distance past the pad edge.
+        share_mm: Same-net pads this close reuse one via.
+        lock: Lock vias/stubs so the router keeps them.
+
+    Never via-in-pad; clears other nets on every layer, via keep-outs and the board edge; skips
+    pads that already have copper, so it is safe to re-run. Returns failed pads with positions.
+    """
+    return _fanout_vias(pcb_path=pcb_path, nets=nets, via_diameter_mm=via_diameter_mm, via_drill_mm=via_drill_mm,
+                        stub_width_mm=stub_width_mm, max_distance_mm=max_distance_mm, share_mm=share_mm,
+                        lock=lock, allow_while_open=allow_while_open)
 
 
 @server.tool()
@@ -463,6 +597,9 @@ def import_specctra_ses(
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
     """Import a Freerouting Specctra SES file and inject routed tracks and vias into .kicad_pcb headlessly.
+
+    Replaces all unlocked tracks and vias with the session's; locked items (e.g. from fanout_vias)
+    are kept exactly as they were.
 
     Args:
         pcb_path: Path to target .kicad_pcb file.

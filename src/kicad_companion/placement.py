@@ -226,40 +226,71 @@ by_ref = {fp.GetReference(): fp for fp in board.GetFootprints()}
 ol = board_outline(board)
 ox, oy = (ol[0], ol[1]) if (ol and ARGS["relative"]) else (0.0, 0.0)
 gap = ARGS["gap"]
+def is_through(fp):
+    return any(p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH) for p in fp.Pads())
+def side_of(fp):
+    return "both" if is_through(fp) else ("B" if fp.IsFlipped() else "F")
+def set_side(fp, side):
+    if (side == "B") != fp.IsFlipped():
+        fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
 def place_center(fp, cx, cy, rot):
     fp.SetOrientationDegrees(rot)
     b = courtyard_bbox(fp)
     fp.Move(pcbnew.VECTOR2I(mm(cx - (b[0] + b[2]) / 2), mm(cy - (b[1] + b[3]) / 2)))
-rects, done, overflow, unknown = [], set(), [], []
+def rel(r):
+    return [v + (ox if i % 2 == 0 else oy) for i, v in enumerate(r)]
+rects, done, overflow, unknown = [], set(), [], []   # rect = (x0, y0, x1, y1, side, halo)
+# functional groups: each member is placed by connectivity but kept inside its group's rect
+# and on its group's sides; group_of[ref] = (x0, y0, x1, y1, sides, target)
+group_of, group_spill = {}, []
+for g in ARGS.get("groups", []):
+    gr = rel(g["rect"])
+    gt = rel(g["target"]) if g.get("target") else [(gr[0] + gr[2]) / 2, (gr[1] + gr[3]) / 2]
+    gtuple = (gr[0], gr[1], gr[2], gr[3], g.get("sides") or [g.get("side", "F")], gt)   # shared: identity = group
+    for ref in g["refs"]:
+        group_of.setdefault(ref, gtuple)
+for k in ARGS["keepouts"]:
+    rects.append(tuple(rel(k["rect"])) + (k.get("side", "both"), 0.0))
 for ref, spec in ARGS["fixed"].items():
     fp = by_ref.get(ref)
     if fp is None:
         unknown.append(ref); continue
-    x, y = spec[0] + ox, spec[1] + oy
-    place_center(fp, x, y, spec[2] if len(spec) > 2 else fp.GetOrientationDegrees())
-    rects.append(courtyard_bbox(fp)); done.add(ref)
+    set_side(fp, spec[3] if len(spec) > 3 else "F")
+    place_center(fp, spec[0] + ox, spec[1] + oy, spec[2] if len(spec) > 2 else fp.GetOrientationDegrees())
+    rects.append(courtyard_bbox(fp) + (side_of(fp), 0.0)); done.add(ref)
 for ref, fp in by_ref.items():
     if ref not in done and ref in ARGS["keep"]:
-        rects.append(courtyard_bbox(fp)); done.add(ref)
-def free(a):
-    return all(a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1] for b in rects)
-def pack(fp, x0, y0, x1, y1, rot, step):
+        rects.append(courtyard_bbox(fp) + (side_of(fp), 0.0)); done.add(ref)
+HALO = {"cur": 0.0}   # routing halo of the part currently being placed
+def free(a, side):
+    h = HALO["cur"]
+    for b in rects:
+        if not (side == "both" or b[4] == "both" or b[4] == side):
+            continue
+        g = gap + (h if HALO.get("tight") else max(h, b[5]))
+        if not (a[2] + g <= b[0] or b[2] + g <= a[0] or a[3] + g <= b[1] or b[3] + g <= a[1]):
+            return False
+    return True
+def pack(fp, x0, y0, x1, y1, rot, step, side):
+    set_side(fp, side)
     fp.SetOrientationDegrees(rot)
     b = courtyard_bbox(fp)
     w, h = b[2] - b[0], b[3] - b[1]
+    occ = side_of(fp)
     y = y0
     while y + h <= y1 + 1e-6:
         x = x0
         while x + w <= x1 + 1e-6:
-            if free((x, y, x + w, y + h)):
+            if free((x, y, x + w, y + h), occ):
                 place_center(fp, x + w / 2, y + h / 2, rot)
-                rects.append((x, y, x + w, y + h))
+                rects.append((x, y, x + w, y + h, occ, HALO["cur"]))
                 return True
             x += step
         y += step
     return False
 for reg in ARGS["regions"]:
-    x0, y0, x1, y1 = [v + (ox if i % 2 == 0 else oy) for i, v in enumerate(reg["rect"])]
+    x0, y0, x1, y1 = rel(reg["rect"])
+    sides = reg.get("sides") or [reg.get("side", "F")]
     for ref in reg["refs"]:
         fp = by_ref.get(ref)
         if fp is None:
@@ -267,17 +298,283 @@ for reg in ARGS["regions"]:
         if ref in done:
             continue
         rot = reg.get("rotations", {}).get(ref, reg.get("rotation", 0))
-        (done.add(ref) if pack(fp, x0, y0, x1, y1, rot, ARGS["step"]) else overflow.append(ref))
-if ARGS["auto_rest"] and ol:
+        if any(pack(fp, x0, y0, x1, y1, rot, ARGS["step"], sd) for sd in sides):
+            done.add(ref)
+        else:
+            overflow.append(ref)
+def area(f):
+    b = courtyard_bbox(f)
+    return (b[2] - b[0]) * (b[3] - b[1])
+if ARGS["auto_rest"] and ol and ARGS["strategy"] == "pack":
     rest = [fp for r, fp in by_ref.items() if r not in done]
-    rest.sort(key=lambda f: (-(lambda b: (b[2] - b[0]) * (b[3] - b[1]))(courtyard_bbox(f)), f.GetReference()))
+    rest.sort(key=lambda f: (-area(f), f.GetReference()))
     m = ARGS["margin"]
     for fp in rest:
-        (done.add(fp.GetReference()) if pack(fp, ol[0] + m, ol[1] + m, ol[2] - m, ol[3] - m,
-                                            fp.GetOrientationDegrees(), ARGS["step"]) else overflow.append(fp.GetReference()))
+        rots = [0, 90] if ARGS["try_rotations"] else [fp.GetOrientationDegrees()]
+        ok = any(pack(fp, ol[0] + m, ol[1] + m, ol[2] - m, ol[3] - m, rot, ARGS["step"], sd)
+                 for sd in ARGS["auto_sides"] for rot in rots)
+        (done.add(fp.GetReference()) if ok else overflow.append(fp.GetReference()))
+elif ARGS["auto_rest"] and ol:
+    # Connectivity-driven: place each part as close as possible to the parts it shares
+    # signal nets with (supply/ground and other high-fanout nets are ignored), which keeps
+    # functional blocks together and makes the board far easier to route.
+    pad_count = {}
+    for f in by_ref.values():
+        for p in f.Pads():
+            n = p.GetNetname()
+            if n:
+                pad_count[n] = pad_count.get(n, 0) + 1
+    def nets_of(f):
+        return {p.GetNetname() for p in f.Pads()
+                if p.GetNetname() and 1 < pad_count[p.GetNetname()] <= ARGS["max_net_pads"]
+                and not p.GetNetname().startswith("unconnected-")}
+    nets = {r: nets_of(f) for r, f in by_ref.items()}
+    def center(f):
+        b = courtyard_bbox(f)
+        return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+    placed_c = {r: center(by_ref[r]) for r in done}
+    def pad_xy(p):
+        q = p.GetPosition()
+        return (pcbnew.ToMM(q.x), pcbnew.ToMM(q.y))
+    def anchor_point(r, ic):
+        # the IC pad on the cap's lowest-fanout shared net (the supply pin, not ground)
+        shared = {p.GetNetname() for p in by_ref[r].Pads() if p.GetNetname()} &                  {p.GetNetname() for p in by_ref[ic].Pads() if p.GetNetname()}
+        if not shared:
+            return placed_c[ic]
+        n = min(shared, key=lambda k: pad_count.get(k, 0))
+        pts = [pad_xy(p) for p in by_ref[ic].Pads() if p.GetNetname() == n]
+        return (sum(x for x, _ in pts) / len(pts), sum(y for _, y in pts) / len(pts))
+    def net_points(r):
+        # pads of already-placed parts on each signal net this part uses (one mean point per net)
+        out = []
+        for n in nets[r]:
+            pts = [pad_xy(p) for q in placed_c for p in by_ref[q].Pads() if p.GetNetname() == n]
+            if pts:
+                out.append(((sum(x for x, _ in pts) / len(pts), sum(y for _, y in pts) / len(pts)), 1))
+        return out
+    m, step = ARGS["margin"], ARGS["step"]
+    todo = set(by_ref) - done
+    # Adaptive routing halo: spread parts so they use ~target_util of the usable area
+    # instead of clumping, scaling each part's halo with its pin count (fanout room).
+    def npins(f):
+        return len({p.GetNumber() for p in f.Pads() if p.GetNumber()})
+    def weight(r):
+        return min(2.0, max(0.5, (npins(by_ref[r]) / 4.0) ** 0.5))
+    halo_of = {}
+    if ARGS["halo"] == "auto" or isinstance(ARGS["halo"], (int, float)):
+        dims = {}
+        for r in todo:
+            b = courtyard_bbox(by_ref[r])
+            dims[r] = (b[2] - b[0], b[3] - b[1])
+        def solve_halo(members, area_rect, sides, util):
+            # halo that makes these members fill ~target_util of the free area of area_rect
+            x0, y0, x1, y1 = area_rect
+            blocked = 0.0
+            for q in rects:
+                if q[4] != "both" and q[4] not in sides:
+                    continue
+                ox_ = min(x1, q[2]) - max(x0, q[0])
+                oy_ = min(y1, q[3]) - max(y0, q[1])
+                if ox_ > 0 and oy_ > 0:
+                    blocked += ox_ * oy_ * (len(sides) if q[4] == "both" else 1)
+            avail = max(1.0, (x1 - x0) * (y1 - y0) * len(sides) - blocked) * util
+            lo, hi = 0.0, 3.0
+            for _ in range(40):
+                d = (lo + hi) / 2
+                need = sum((dims[r][0] + 2 * d * weight(r) + gap) * (dims[r][1] + 2 * d * weight(r) + gap) for r in members)
+                lo, hi = (d, hi) if need < avail else (lo, d)
+            return lo
+        if ARGS["halo"] == "auto":
+            # grouped parts share their group's rect; everything else shares the board
+            by_area = {}
+            for r in todo:
+                g = group_of.get(r)
+                key = (g[0], g[1], g[2], g[3], tuple(g[4])) if g else None
+                by_area.setdefault(key, []).append(r)
+            board_rect = (ol[0] + m, ol[1] + m, ol[2] - m, ol[3] - m)
+            for key, members in by_area.items():
+                if key is None:
+                    base = solve_halo(members, board_rect, ARGS["auto_sides"], ARGS["target_util"])
+                else:
+                    # members of every group sharing this rect compete for it
+                    # a small rect packs less efficiently than the open board
+                    base = solve_halo(members, key[:4], list(key[4]), ARGS["target_util"] * 0.75)
+                for r in members:
+                    halo_of[r] = base * weight(r)
+        else:
+            halo_of = {r: float(ARGS["halo"]) * weight(r) for r in todo}
+    # Decoupling-style parts connect only to high-fanout (supply) nets. Assign each one to an
+    # IC on the same supply, round-robin, and place it right after the ICs.
+    def supply_nets(f):
+        return {p.GetNetname() for p in f.Pads() if p.GetNetname() and pad_count[p.GetNetname()] > ARGS["max_net_pads"]}
+    def pins(f):
+        return {p.GetNumber() for p in f.Pads() if p.GetNumber()}
+    ics = [r for r, f in by_ref.items() if len(pins(f)) >= 4]
+    ic_supplies = {r: supply_nets(by_ref[r]) for r in ics}
+    load = {r: 0 for r in ics}
+    anchor = {}
+    for r in sorted(todo):
+        f = by_ref[r]
+        if nets[r] or len(pins(f)) < 2 or r in ics:
+            continue
+        sup = supply_nets(f)
+        cands = [ic for ic in ics if ic_supplies[ic] & sup and len(ic_supplies[ic] & sup) >= min(2, len(sup))]
+        if cands:
+            same = [c for c in cands if r in group_of and group_of.get(c) is group_of[r]]
+            ic = min(same or cands, key=lambda c: (load[c], c))
+            load[ic] += 1
+            anchor[r] = ic
+    # explicit proximity rules (feedback networks, timing parts, reference caps): same treatment
+    # as decoupling, aimed at the target's pad on the lowest-fanout net they share
+    supply_decap = set(anchor)   # supply decoupling gets first pick of the spots at its IC
+    for r, t in ARGS.get("near", {}).items():
+        if r in todo and t in by_ref:
+            anchor[r] = t
+    while todo:
+        def score(r):
+            # large parts (ICs, connectors) first, then decoupling parts next to their IC,
+            # then everything else by how many signal links it has to placed parts
+            links = sum(len(nets[r] & nets[q]) for q in placed_c)
+            dec = r in anchor and anchor[r] in placed_c
+            return (area(by_ref[r]) >= ARGS["big_area"], dec, dec and r in supply_decap, links, area(by_ref[r]))
+        r = max(sorted(todo), key=score)
+        todo.discard(r)
+        fp = by_ref[r]
+        HALO["cur"] = halo_of.get(r, 0.0)
+        decap = r in anchor and anchor[r] in placed_c
+        HALO["tight"] = decap
+        if decap:
+            HALO["cur"] = 0.0   # decoupling goes hard against its IC's supply pins, inside its halo
+        peers = net_points(r)
+        if decap:
+            peers = [(anchor_point(r, anchor[r]), 1)]
+        if peers:
+            wsum = sum(w for _, w in peers)
+            tx = sum(c[0] * w for c, w in peers) / wsum
+            ty = sum(c[1] * w for c, w in peers) / wsum
+        else:
+            tx, ty = (ol[0] + ol[2]) / 2, (ol[1] + ol[3]) / 2
+        grp = group_of.get(r)
+        if grp:
+            gw = ARGS["group_pull"] if peers and not (r in anchor and anchor[r] in placed_c) else 1.0
+            if r in anchor and anchor[r] in placed_c:
+                gw = 0.0
+            tx, ty = tx * (1 - gw) + grp[5][0] * gw, ty * (1 - gw) + grp[5][1] * gw
+        sides_try = [sd for sd in (grp[4] if grp else ARGS["auto_sides"])]
+        best = None
+        rots = [0, 90] if ARGS["try_rotations"] else [fp.GetOrientationDegrees()]
+        for si, sd in enumerate(sides_try):
+            for rot in rots:
+                set_side(fp, sd)
+                fp.SetOrientationDegrees(rot)
+                b = courtyard_bbox(fp)
+                w, h = b[2] - b[0], b[3] - b[1]
+                occ = side_of(fp)
+                # contact-point candidates: flush with the outline or with an existing
+                # courtyard (plus a coarse grid near the target), so free space stays compact
+                lo_x, hi_x = ol[0] + m, ol[2] - m - w
+                lo_y, hi_y = ol[1] + m, ol[3] - m - h
+                if grp:
+                    lo_x, hi_x = max(lo_x, grp[0]), min(hi_x, grp[2] - w)
+                    lo_y, hi_y = max(lo_y, grp[1]), min(hi_y, grp[3] - h)
+                    if lo_x > hi_x + 1e-6 or lo_y > hi_y + 1e-6:
+                        continue
+                xs, ys = {lo_x, hi_x}, {lo_y, hi_y}
+                for q in rects:
+                    if not (occ == "both" or q[4] == "both" or q[4] == occ):
+                        continue
+                    if abs((q[0] + q[2]) / 2 - tx) > ARGS["search_radius"] or abs((q[1] + q[3]) / 2 - ty) > ARGS["search_radius"]:
+                        continue
+                    xs.update((q[2] + gap, q[0] - gap - w, q[0], q[2] - w))
+                    ys.update((q[3] + gap, q[1] - gap - h, q[1], q[3] - h))
+                for i in range(-8, 9):
+                    xs.add(round((tx - w / 2 + i * step * 4) / step) * step)
+                    ys.add(round((ty - h / 2 + i * step * 4) / step) * step)
+                if ARGS["spread_weight"] > 0:
+                    # coarse whole-board grid so empty regions are reachable, not only
+                    # spots touching already-placed parts
+                    cg = ARGS["spread_grid"]
+                    xs.update(lo_x + i * cg for i in range(int((hi_x - lo_x) / cg) + 1))
+                    ys.update(lo_y + j * cg for j in range(int((hi_y - lo_y) / cg) + 1))
+                xs = [x for x in xs if lo_x - 1e-6 <= x <= hi_x + 1e-6]
+                ys = [y for y in ys if lo_y - 1e-6 <= y <= hi_y + 1e-6]
+                cands = sorted(((x + w / 2 - tx) ** 2 + (y + h / 2 - ty) ** 2, x, y) for x in xs for y in ys)
+                if not cands:
+                    continue
+                # gather the nearest free spots, then trade distance against local crowding
+                found = []
+                for d2, x, y in cands:
+                    base = d2 ** 0.5 + si * ARGS["side_penalty"]
+                    if best is not None and base >= best[0]:
+                        break
+                    if free((x, y, x + w, y + h), occ):
+                        found.append((base, x, y))
+                        if len(found) >= ARGS["spread_candidates"] or ARGS["spread_weight"] <= 0 or decap:
+                            break
+                R = ARGS["spread_radius"]
+                for base, x, y in found:
+                    cost = base
+                    if ARGS["spread_weight"] > 0 and not decap:
+                        wx0, wy0, wx1, wy1 = x - R, y - R, x + w + R, y + h + R
+                        win = (wx1 - wx0) * (wy1 - wy0)
+                        occd = 0.0
+                        for q in rects:
+                            if not (occ == "both" or q[4] == "both" or q[4] == occ):
+                                continue
+                            ox_ = min(wx1, q[2]) - max(wx0, q[0])
+                            oy_ = min(wy1, q[3]) - max(wy0, q[1])
+                            if ox_ > 0 and oy_ > 0:
+                                occd += ox_ * oy_
+                        cost += ARGS["spread_weight"] * occd / win
+                    if best is None or cost < best[0]:
+                        best = (cost, sd, rot, x, y, w, h, occ)
+        for scope in ((grp, None) if grp else (None,)):
+          if best is not None:
+              break
+          if grp and scope is None and HALO["cur"] > 0:
+              break   # retry without halo inside the group before spilling out of it
+          if grp and scope is None:
+              group_spill.append(r)
+          # fallback: exhaustive grid scan, nearest free spot to the target
+          for si, sd in enumerate(sides_try if scope else ARGS["auto_sides"]):
+                for rot in rots:
+                    set_side(fp, sd)
+                    fp.SetOrientationDegrees(rot)
+                    b = courtyard_bbox(fp)
+                    w, h = b[2] - b[0], b[3] - b[1]
+                    occ = side_of(fp)
+                    bx0, by0, bx1, by1 = (max(ol[0] + m, scope[0]), max(ol[1] + m, scope[1]),
+                                          min(ol[2] - m, scope[2]), min(ol[3] - m, scope[3])) if scope else                                          (ol[0] + m, ol[1] + m, ol[2] - m, ol[3] - m)
+                    gx = [bx0 + i * step for i in range(int((bx1 - bx0 - w) / step) + 1)]
+                    gy = [by0 + j * step for j in range(int((by1 - by0 - h) / step) + 1)]
+                    for d2, x, y in sorted(((x + w / 2 - tx) ** 2 + (y + h / 2 - ty) ** 2, x, y) for x in gx for y in gy):
+                        cost = d2 ** 0.5 + si * ARGS["side_penalty"]
+                        if best is not None and cost >= best[0]:
+                            break
+                        if free((x, y, x + w, y + h), occ):
+                            best = (cost, sd, rot, x, y, w, h, occ)
+                            break
+        if best is None and HALO["cur"] > 0:
+            HALO["cur"] = 0.0
+            todo.add(r)
+            halo_of[r] = 0.0
+            continue
+        if best is None:
+            overflow.append(r)
+            continue
+        _, sd, rot, x, y, w, h, occ = best
+        set_side(fp, sd)
+        place_center(fp, x + w / 2, y + h / 2, rot)
+        rects.append((x, y, x + w, y + h, occ, HALO["cur"]))
+        placed_c[r] = (x + w / 2, y + h / 2)
+        done.add(r)
 board.Save(ARGS["pcb"])
 emit({"placed": len(done), "overflow": overflow, "unknown_refs": unknown,
-      "unplaced": sorted(r for r in by_ref if r not in done)})
+      "decoupling_anchors": len(globals().get("anchor", {})),
+      "group_spill": sorted(set(group_spill)),
+      "routing_halo_mm": round(max(globals().get("halo_of", {0: 0}).values() or [0]), 3),
+      "unplaced": sorted(r for r in by_ref if r not in done),
+      "back_side": sorted(r for r, f in by_ref.items() if f.IsFlipped())})
 '''
 
 
@@ -291,15 +588,54 @@ def place_footprints(
     step_mm: float = 0.25,
     margin_mm: float = 1.0,
     relative_to_outline: bool = True,
+    keepouts: Optional[List[Dict[str, Any]]] = None,
+    auto_sides: Optional[List[str]] = None,
+    try_rotations: bool = True,
+    strategy: str = "connectivity",
+    max_net_pads: int = 12,
+    side_penalty_mm: float = 2.0,
+    routing_halo: Any = "auto",
+    target_utilization: float = 0.8,
+    spread_weight_mm: float = 6.0,
+    groups: Optional[List[Dict[str, Any]]] = None,
+    group_pull: float = 0.35,
+    near: Optional[Dict[str, str]] = None,
     allow_while_open: bool = False,
 ) -> Dict[str, Any]:
-    """Deterministic placement from a plan, using exact courtyards.
+    """Deterministic placement from a plan, using exact courtyards, on one or both board sides.
 
     Args:
         pcb_path: Board to modify.
-        fixed: {ref: [cx, cy, rot]} courtyard-centre positions (mm, board-relative by default).
-        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "rotations": {ref: deg}}];
-            refs are first-fit packed top-left to bottom-right in the given order.
+        fixed: {ref: [cx, cy, rot, side]} courtyard-centre positions (mm, board-relative by default);
+            side is "F" (default) or "B".
+        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "rotations": {ref: deg},
+            "side": "F" | "B", "sides": ["B", "F"]}]; refs are first-fit packed in the given order.
+        keepouts: [{"rect": [x0, y0, x1, y1], "side": "F" | "B" | "both"}] areas nothing is packed into
+            (e.g. a lens holder base). Through-hole parts block both sides automatically.
+        auto_sides: Sides tried, in order, for auto-placed parts (default ["F"]).
+        try_rotations: Also try 90 degrees for auto-placed parts.
+        strategy: "connectivity" (default) places each remaining part as close as possible to the
+            parts it shares signal nets with; "pack" first-fit packs largest-first.
+        max_net_pads: Nets with more pads than this (supplies, ground, references) are ignored
+            when clustering. side_penalty_mm: extra cost per step down the auto_sides list.
+        routing_halo: Extra clearance reserved around each auto-placed part for routing, in mm,
+            scaled by sqrt(pins/4) (0.5x-2x). "auto" sizes it so the parts spread over about
+            target_utilization of the free area, so a bigger board actually gets used. 0 = dense.
+        spread_weight_mm: Crowding penalty. Each candidate spot costs its distance to the part's
+            connected neighbours plus spread_weight_mm x (occupied fraction of a 2.5 mm window
+            around it), so parts drift into empty board regions instead of piling up next to the
+            fixed parts. 0 disables it (pure nearest-fit clustering).
+        groups: Functional groups for connectivity placement: [{"refs": [...], "rect": [x0, y0, x1, y1],
+            "sides": ["B"], "target": [x, y]}]. Members are still placed next to the parts they share
+            signal nets with, but only inside their rect and on their sides; decoupling parts stick to
+            an IC of their own group. A member that cannot fit spills to the whole board and is listed
+            in "group_spill".
+        near: {ref: target_ref} proximity rules, e.g. TIA feedback R/C -> op-amp, one-shot timing R/C
+            -> its IC, reference caps -> the reference. Placed right after the target, as close as
+            possible to the target's pad on the net they share (like decoupling caps, which are
+            matched to an IC of their own group automatically).
+        group_pull: 0-1, how strongly members are pulled toward their group target versus their
+            connected neighbours.
         keep_refs: Footprints left where they are but treated as obstacles.
         auto_place_rest: First-fit pack every remaining footprint inside the outline (largest first).
         gap_mm: Courtyard-to-courtyard gap. step_mm: search grid for packing.
@@ -311,7 +647,12 @@ def place_footprints(
     res = run_pcbnew(_PLACE_JOB, {
         "pcb": str(p_path), "fixed": fixed or {}, "regions": regions or [], "keep": keep_refs or [],
         "auto_rest": auto_place_rest, "gap": gap_mm, "step": step_mm, "margin": margin_mm,
-        "relative": relative_to_outline,
+        "relative": relative_to_outline, "keepouts": keepouts or [], "auto_sides": auto_sides or ["F"],
+        "try_rotations": try_rotations, "strategy": strategy, "max_net_pads": max_net_pads,
+        "side_penalty": side_penalty_mm, "search_radius": 1e9, "big_area": 6.0,
+        "halo": routing_halo, "target_util": target_utilization,
+        "groups": groups or [], "group_pull": group_pull, "near": near or {},
+        "spread_weight": spread_weight_mm, "spread_radius": 2.5, "spread_candidates": 40, "spread_grid": 1.0,
     })
     check = check_placement_overlaps(str(p_path), min_clearance_mm=min(gap_mm, 0.25))
     return {"status": "success" if not res["overflow"] else "partial", **res,
