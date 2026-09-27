@@ -241,13 +241,30 @@ build_production_package(
 1. **DRC Pre-Flight:** Headless DRC run; stops immediately if critical copper clearance or unrouted errors exist.
 2. **Gerber & Drill Generation:** Exports Protel-standard layers (`.GTL`, `.GBL`, `.GTS`, `.GBS`, `.GTO`, `.GBO`, `.GKO`, `.DRL`).
 3. **Automated ZIP Archive:** Packages gerbers into `<revision>-gerber.zip` ready for immediate JLCPCB/PCBWay upload.
-4. **Centroid / CPL Export:** Generates pick-and-place `.csv` with LCSC Part # cross-referencing.
+4. **Centroid / CPL & BOM Export:** Automatically formats JLCPCB-compliant CPL (`<stem>-cpl-jlcpcb.csv`) and BOM (`<stem>-bom-jlcpcb.csv`) with LCSC part number resolution.
 5. **High-Fidelity 3D STEP Solid Model:** Exports `<revision>.step` for mechanical CAD clearance verification.
 6. **Vector Documentation SVGs:** Updates top/bottom copper, silkscreen, and schematic sheet SVGs for rapid review.
 
 ---
 
-## 14. Overarching Hardware Standards (Mandatory for ALL Agents)
+### 14. Automated JLCPCB Assembly Export (`export_jlcpcb_assembly`)
+Directly generates JLCPCB-compliant BOM and CPL (pick-and-place) files using KiCad as the absolute source of truth:
+```python
+export_jlcpcb_assembly(
+    pcb_path="path/to/board.kicad_pcb",
+    sch_path="path/to/board.kicad_sch", # optional, auto-discovered if omitted
+    output_dir="path/to/production" # optional
+)
+```
+**Zero-Error Guarantees:**
+- **Authoritative Geometry:** Extracts footprint coordinates directly from `.kicad_pcb` via `kicad-cli`, converting KiCad's inverted Y-axis to JLCPCB positive coordinates and setting layer to `Top` / `Bottom`.
+- **Intelligent SMT Filtering:** Automatically excludes mechanical elements (mounting holes `H*`, test points `TP*`, fiducials `FID*`, graphics `LOGO*`) and through-hole headers/LEDs from automated SMT pick-and-place.
+- **LCSC Resolution Hierarchy:** Correlates references against schematic symbol properties (`LCSC`, `LCSC Part #`), project `.companion/preferred_parts.json`, and outputs structured BOM and CPL files ready for drag-and-drop upload.
+- **Validation Reporting:** Returns `assigned_lcsc_count` and flags any unassigned components so the agent or user can assign missing part numbers before fabrication.
+
+---
+
+## 15. Overarching Hardware Standards (Mandatory for ALL Agents)
 
 Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) must strictly adhere to these 14 design rules:
 

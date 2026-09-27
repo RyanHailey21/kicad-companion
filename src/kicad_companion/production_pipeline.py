@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import find_kicad_cli
+from .jlcpcb_assembly import generate_jlcpcb_assembly
 from .project_context import find_project_root
 from .renderer import render_pcb_2d, render_schematic
 
@@ -124,7 +125,7 @@ def build_production_package(
         for f in gerbers_dir.glob("*.*"):
             zf.write(f, arcname=f.name)
 
-    # 6. Export SMT Pick-and-Place (CPL)
+    # 6. Export SMT Pick-and-Place (CPL) and BOM
     cpl_path = production_dir / f"{stem}-cpl.csv"
     pos_cmd = [
         kicad_cli,
@@ -137,6 +138,14 @@ def build_production_package(
         str(p_path),
     ]
     subprocess.run(pos_cmd, capture_output=True, text=True, check=False)
+
+    jlcpcb_assembly_info = None
+    if fab_house.lower() == "jlcpcb":
+        jlcpcb_assembly_info = generate_jlcpcb_assembly(
+            pcb_path=str(p_path),
+            sch_path=str(s_path) if s_path.is_file() else None,
+            output_dir=str(production_dir),
+        )
 
     # 7. Export 3D STEP Model
     step_path = production_dir / f"{stem}-{revision}.step"
@@ -191,6 +200,7 @@ def build_production_package(
             "size_mb": round(step_path.stat().st_size / (1024 * 1024), 2) if step_path.is_file() else 0,
         },
         "cpl_file": str(cpl_path),
+        "jlcpcb_assembly": jlcpcb_assembly_info,
         "total_gerber_files": len(list(gerbers_dir.glob("*.*"))),
         "documentation_renders": doc_renders,
         "summary": (

@@ -30,6 +30,7 @@ from .spice_verifier import (
 )
 from .pinout_audit import audit_component_pinouts as _audit_component_pinouts
 from .production_pipeline import build_production_package as _build_production_package
+from .jlcpcb_assembly import generate_jlcpcb_assembly as _generate_jlcpcb_assembly
 
 server = MCPServer("kicad-companion")
 
@@ -447,6 +448,37 @@ def build_production_package(
         fab_house=fab_house,
         generate_3d_step=generate_3d_step,
         generate_doc_svgs=generate_doc_svgs,
+    )
+
+
+@server.tool()
+def export_jlcpcb_assembly(
+    pcb_path: str,
+    sch_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    preferred_parts_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate JLCPCB-compliant BOM and CPL (pick-and-place) files directly from KiCad design files.
+    
+    Treats KiCad as the authoritative source of truth. Extracts component positions,
+    layers, and rotations directly from the PCB, and correlates references, values,
+    and LCSC Part # properties from the schematic and project preferred parts configuration.
+    
+    Produces:
+    - <stem>-cpl-jlcpcb.csv: Designator, Mid X, Mid Y, Layer, Rotation
+    - <stem>-bom-jlcpcb.csv: Comment, Designator, Footprint, LCSC Part #
+    
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        sch_path: Optional path to the .kicad_sch file.
+        output_dir: Optional destination directory (defaults to <project>/production/).
+        preferred_parts_path: Optional path to preferred_parts.json.
+    """
+    return _generate_jlcpcb_assembly(
+        pcb_path=pcb_path,
+        sch_path=sch_path,
+        output_dir=output_dir,
+        preferred_parts_path=preferred_parts_path,
     )
 
 
