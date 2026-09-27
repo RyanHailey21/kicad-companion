@@ -8,11 +8,30 @@ from typing import Any, Dict, List
 from .config import find_kicad_cli, get_render_cache_dir
 
 
+def _same_footprint(items: List[Dict[str, Any]]) -> bool:
+    """True when every item is a pad of one footprint, e.g. 'PTH pad 2 [/Q_B] of Q1'."""
+    owners = set()
+    for it in items:
+        d = it.get("description", "")
+        if " pad " not in d or " of " not in d:
+            return False
+        owners.add(d.rsplit(" of ", 1)[-1])
+    return len(owners) == 1 and len(items) > 1
+
+
 def triage_pcb_drc(
     pcb_path: str,
     max_items_per_group: int = 10,
+    refill_zones: bool = False,
+    schematic_parity: bool = False,
 ) -> Dict[str, Any]:
-    """Run DRC in JSON mode and triage violations into categorized, actionable insights."""
+    """Run DRC in JSON mode and triage violations into categorized, actionable insights.
+
+    Args:
+        refill_zones: Refill copper zones before checking (catches stale pours).
+        schematic_parity: Also compare the board against the schematic (missing/extra
+            footprints, net and field mismatches), like the GUI's parity check.
+    """
     kicad_cli = find_kicad_cli()
     p_path = Path(pcb_path).resolve()
     if not p_path.is_file():
@@ -33,8 +52,12 @@ def triage_pcb_drc(
         "--severity-all",
         "-o",
         str(report_file),
-        str(p_path),
     ]
+    if refill_zones:
+        cmd.append("--refill-zones")
+    if schematic_parity:
+        cmd.append("--schematic-parity")
+    cmd.append(str(p_path))
 
     proc = subprocess.run(
         cmd,
@@ -55,6 +78,8 @@ def triage_pcb_drc(
 
     violations = data.get("violations", [])
     unconnected_items = data.get("unconnected_items", [])
+    parity_items = data.get("schematic_parity", [])
+    footprint_internal: List[str] = []
 
     critical_errors: List[Dict[str, Any]] = []
     fab_hazards: List[Dict[str, Any]] = []
@@ -80,6 +105,13 @@ def triage_pcb_drc(
                 for item in items
             ],
         }
+
+        if "clearance" in v_type and _same_footprint(items):
+            owner = items[0].get("description", "").rsplit(" of ", 1)[-1]
+            entry["hint"] = (f"Pads of {owner} are closer together than the net-class clearance. "
+                             "This is the footprint's own pad spacing: pick a wider footprint variant "
+                             "or lower that net class clearance; rerouting cannot fix it.")
+            footprint_internal.append(owner)
 
         if severity == "error" and "silk" not in v_type:
             critical_errors.append(entry)
@@ -126,9 +158,13 @@ def triage_pcb_drc(
         top_nets = sorted(net_unconnected.keys(), key=lambda k: len(net_unconnected[k]), reverse=True)[:5]
         top_summary = ", ".join([f"{n} ({len(net_unconnected[n])} pins)" for n in top_nets])
         remediations.append(f"Route major unconnected nets: {top_summary}.")
+    if footprint_internal:
+        remediations.append(f"Footprint-internal pad spacing violates clearance on: {', '.join(sorted(set(footprint_internal)))}.")
+    if parity_items:
+        remediations.append(f"{len(parity_items)} schematic/board mismatches: run sync_pcb_nets (or finalize_pcb) to re-link.")
     if library_mismatches:
         remediations.append(f"{len(library_mismatches)} footprints differ from library copies. Consider 'Update Footprints from Library'.")
-    if not critical_errors and not net_unconnected:
+    if not critical_errors and not net_unconnected and not parity_items:
         remediations.append("Board is clean of electrical and connectivity errors. Ready for final fabrication checks.")
 
     # Format a concise markdown executive summary
@@ -140,6 +176,7 @@ def triage_pcb_drc(
         f"- **Fab/Clearance Hazards:** {len(fab_hazards)}",
         f"- **Cosmetic Warnings:** {len(cosmetics)}",
         f"- **Library Mismatches:** {len(library_mismatches)}",
+    ] + ([f"- **Schematic Parity Issues:** {len(parity_items)}"] if schematic_parity else []) + [
         "",
         "#### Recommendations:",
     ]
@@ -160,6 +197,12 @@ def triage_pcb_drc(
             net: items[:5]
             for net, items in sorted(net_unconnected.items(), key=lambda x: len(x[1]), reverse=True)[:max_items_per_group]
         },
+        "schematic_parity": [
+            {"type": v.get("type"), "description": v.get("description"),
+             "items": [i.get("description") for i in v.get("items", [])]}
+            for v in parity_items[:max_items_per_group]
+        ],
+        "total_parity_issues": len(parity_items),
         "remediations": remediations,
         "raw_report_path": str(report_file),
     }

@@ -16,6 +16,38 @@ This skill guides AI agents (Antigravity, Claude, Codex) on using the **`kicad-c
 
 ## Core Workflows
 
+### 0. Headless Design Pipeline (no GUI, no IPC)
+Use this whenever Konnect's schematic/PCB editing tools are unavailable (for example, a client that doesn't pick up tools loaded mid-session) or when a design should be reproducible from a spec. **Close KiCad first** (Rule 15).
+
+```python
+# 1. Schematic from a declarative spec: official-library symbols, every unit placed
+#    (incl. power units), stub+label wiring, automatic PWR_FLAGs, ERC summary returned.
+generate_schematic(spec="design/spec.json", sch_path="board.kicad_sch")
+#    spec = {"title": ..., "power_flags": "auto", "parts": [
+#      {"ref": "U2", "lib_id": "Amplifier_Operational:MCP6022", "value": "MCP6022",
+#       "footprint": "Package_DIP:DIP-8_W7.62mm_Socket",
+#       "pins": {"1": "VPHOTO_TL", "2": "TIA_IN_TL", "3": "VREF", "4": "GND", "8": "3V3A"},
+#       "fields": {"MPN": "MCP6022-I/P"}, "group": "TIA"}]}
+#    A pin mapped to null gets a no-connect flag. Re-running keeps symbol UUIDs stable,
+#    so an existing PCB stays linked.
+
+# 2. Board from the schematic: footprints, exact net names, symbol links, outline, placement
+build_pcb_from_schematic(sch_path="board.kicad_sch", board_width_mm=100, board_height_mm=100,
+    fixed={"J1": [48, 92.6, 90], "H1": [4, 4, 0]},                       # courtyard centres, board-relative
+    regions=[{"rect": [2, 41, 25, 58.6], "refs": ["U4", "C10", "R7"]}],  # first-fit packing, in order
+    auto_place_rest=True)
+
+# 3. Net classes that match KiCad's real net names ("/GND" and "*/VREF" patterns)
+configure_netclasses(project_path=".", classes={"Analog": {"track_width": 0.3, "clearance": 0.3}},
+                     assignments={"Analog": ["VREF", "TIA_IN_*"]}, board_rules={"min_resolved_spokes": 1})
+
+# 4. Route, finish, verify
+autoroute_board(pcb_path="board.kicad_pcb", passes=30)
+finalize_pcb(pcb_path="board.kicad_pcb", pour_net="GND")   # re-link to schematic + GND pours + fill
+sanitize_silkscreen(pcb_path="board.kicad_pcb")           # DRC-driven reference placement
+triage_pcb_drc(pcb_path="board.kicad_pcb", refill_zones=True, schematic_parity=True)
+```
+
 ### 1. High-Level Circuit Macro Compiler (Declarative Subcircuits)
 Instead of placing and wiring 10 individual components one by one, use the macro compiler to calculate E24 standard component values, compute grid coordinates, and generate a complete Konnect batch recipe:
 
@@ -93,15 +125,14 @@ When initializing a PCB or updating from schematic changes, ensure all footprint
 ```python
 sync_pcb_nets(pcb_path="path/to/board.kicad_pcb")
 ```
-What this performs:
-1. Executes `kicad-cli sch export netlist` from the project schematic.
-2. Parses net connections and updates every footprint pad with `(net <code> "<name>")`.
-3. Defines top-level `(net ...)` declarations in `.kicad_pcb`.
-4. Configures standard design rules and netclasses in `.kicad_pro`:
-   - `Default`: 0.25mm track, 0.20mm clearance.
-   - `Power`: 0.50mm track, 0.30mm clearance (assigned to VCC, 3V3, 5V, GND, PWR rails).
-   - `Analog_Sensitive`: 0.30mm track, 0.25mm clearance (for high-impedance/sensor nodes).
-   - `Digital_Events`: 0.25mm track, 0.20mm clearance (for fast digital pulses/clocks).
+What this performs (through pcbnew, never text surgery):
+1. Exports the netlist with `kicad-cli sch export netlist`.
+2. Sets every pad's net using KiCad's exact names (local-label nets keep their sheet prefix, e.g. `/GND`), including `unconnected-(...)` nets on no-connect pins.
+3. Re-links footprints to their symbols and copies value, description, custom fields and DNP/BOM flags, so DRC schematic parity is clean.
+4. Reports footprints missing on the board / extra on the board (it never adds or removes footprints; use `build_pcb_from_schematic`).
+5. Optionally merges an automatic `Power` net class for supply/ground nets without touching existing classes.
+
+For project-specific classes use `configure_netclasses(classes=..., assignments=...)`: plain patterns such as `VPHOTO_*` are written as both `VPHOTO_*` and `*/VPHOTO_*`, so they match sheet-prefixed names.
 
 ---
 
@@ -133,17 +164,23 @@ Never engage in repetitive manual trial-and-error coordinate guessing to resolve
    ```python
    check_placement_overlaps(pcb_path="path/to/board.kicad_pcb", min_clearance_mm=0.25)
    ```
-   *Computes exact footprint courtyard extents, verifies connector inset $\ge 2.0\text{ mm}$ from board edge, checks mounting hole clearance $\ge 2.5\text{ mm}$, and reports all pairwise overlapping bounding boxes.*
+   *Reads exact courtyard geometry through pcbnew (footprint origins are often pin 1, so origin-centred boxes are wrong), checks connector inset $\ge 2.0\text{ mm}$ from the outline and mounting-hole keepouts, and also reports KiCad DRC's polygon-accurate courtyard violations.*
 2. **Automated Relaxation & Grid Snap:**
    ```python
    resolve_placement_overlaps(
        pcb_path="path/to/board.kicad_pcb",
        min_clearance_mm=0.5,
        grid_step_mm=0.5,
-       fixed_refs=["J1", "H1", "H2", "H3", "H4", "DPD1", "LED1"],
+       fixed_refs=["D1", "LED1"],   # connectors and mounting holes are fixed automatically
    )
    ```
-   *Applies geometric relaxation along the minimum penetration axis to push overlapping components apart, clamps movable footprints within board margins, snaps final coordinates to a clean grid (0.5mm/1.0mm), and preserves critical fixed anchors.*
+   *Minimum-penetration relaxation on exact courtyards, clamped to the outline, applied through pcbnew; the grid snap picks a floor/ceil combination that keeps clearance.*
+3. **Plan-Driven Placement:**
+   ```python
+   place_footprints(pcb_path=..., fixed={"U2": [35, 18.6, 180]},
+                    regions=[{"rect": [18.5, 8, 29.6, 31], "refs": ["R6", "C9", "R12"]}])
+   ```
+   *Deterministic first-fit packing inside named regions (board-relative mm, courtyard gap), for keeping functional blocks together.*
 
 ---
 
@@ -156,7 +193,7 @@ sanitize_silkscreen(
     min_pad_clearance_mm=0.50,
 )
 ```
-*Automatically hides reference designators for small passives on `F.SilkS` (while preserving them on `F.Fab` for assembly), deduplicates overlaid text lines, and verifies $\ge 0.50\text{ mm}$ clearance from silkscreen to copper pads.*
+*Centres references on part bodies (connectors/test points above), runs KiCad DRC, moves each flagged reference through top/bottom/left/right, and hides it only as a last resort (F.Fab keeps it for assembly). Iterates until DRC reports no silkscreen problems. `hide_passives` hides 0201/0402/0603 refs outright.*
 
 ---
 
@@ -291,9 +328,9 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
   2. Ensure connector pins and bodies remain at least **2.0 mm inside the board outline (`Edge.Cuts`)**.
   3. Ensure at least **2.5 mm clearance from all mounting hole screw heads**.
 
-### Rule 3: Mandatory Quantitative Placement Quality Gate (`score_placement`)
+### Rule 3: Mandatory Quantitative Placement Quality Gate
 - Do not guess coordinates or proceed directly from placement to routing.
-- After placing or moving components, call `konnect:score_placement`.
+- After placing or moving components, call `check_placement_overlaps` (exact courtyards + DRC courtyard check); `konnect:score_placement` is an equivalent gate when Konnect's PCB tools are loaded.
 - **Target Gate:** The layout must achieve:
   - **Score:** `100 / 100`
   - **Verdict:** `pass`
@@ -320,7 +357,7 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
 
 ### Rule 7: Freerouting / Specctra Autorouting Protocol
 - **Single-Thread Optimization Mandatory (`-mt 1`):** Freerouting v2.4+ has a known multi-threaded route optimizer bug that introduces trace-to-trace clearance violations. Always execute Freerouting with `-mt 1`.
-- **Pre-Routing Gate:** Routing must never be attempted unless `score_placement` passes with 100/100 and pad nets/netclasses are synchronized.
+- **Pre-Routing Gate:** Routing must never be attempted unless the placement gate (Rule 3) passes with 100/100 and pad nets/netclasses are synchronized. Confirm net classes resolve on the real net names (Rule 16) or every track is routed at the Default width.
 - **Native Headless SES Import:** Do not invoke C++ wxWidgets SES imports in headless Python scripts to avoid UI event-loop deadlocks. Use `kicad-companion:import_specctra_ses`.
 - **Post-Route DRC Gate:** After SES import, fill ground zones (`refill_zones`) and run `triage_pcb_drc`. The board is not done until unrouted net count is 0 and copper clearances are 0.
 
@@ -363,3 +400,13 @@ Every agent on this system (Antigravity, Claude Code, Claude Desktop, Codex) mus
 - Avoid executing 10-15 granular MCP/shell tool calls (export drill, export gerbers, zip files, export pos, render 3D, render 2D, export schematics, run DRC).
 - Use `build_production_package(pcb_path=..., output_dir=..., revision=..., fab_house=...)` to generate a 100% complete, verified manufacturing release in a single atomic tool call.
 - Ensure all tool outputs return compact, structured JSON summaries instead of verbose unparsed logs.
+
+### Rule 15: Never Edit Files Under an Open KiCad Session
+- KiCad holds the board and project settings in memory and writes them back on save or exit, silently discarding headless edits. The `.kicad_pro` (net classes, rules) is rewritten on exit even without a save.
+- Call `check_project_open(path)` before headless work. Every writing tool refuses by default while KiCad has the project open; `allow_while_open=True` overrides (then use File > Revert in KiCad).
+- Workflow: ask the user to close KiCad **without saving**, run the headless tools, then reopen.
+
+### Rule 16: Net Names Carry Their Sheet Path
+- Nets from local labels are named `/NET` (or `/sheet/NET`); only global power symbols give bare names like `GND`.
+- A net-class pattern `GND*` does not match `/GND`. Use `configure_netclasses`, which writes both `<pat>` and `*/<pat>`, and never strip the prefix from pad nets (it breaks schematic parity and GUI updates).
+- Verify with `triage_pcb_drc(schematic_parity=True)`: 0 parity issues means the board matches the schematic exactly.

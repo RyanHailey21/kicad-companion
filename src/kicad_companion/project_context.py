@@ -79,8 +79,13 @@ def execute_project_script(
     target_path: str,
     script_name: str,
     args: Optional[List[str]] = None,
+    use_kicad_python: bool = False,
+    timeout_s: int = 900,
 ) -> Dict[str, Any]:
-    """Execute a project-specific Python script from the .companion/scripts/ directory."""
+    """Execute a project-specific Python script from the .companion/scripts/ directory.
+
+    use_kicad_python runs it under KiCad's bundled interpreter so it can `import pcbnew`.
+    """
     root = find_project_root(target_path)
     if not root:
         raise FileNotFoundError(f"Could not locate project root for: {target_path}")
@@ -93,7 +98,12 @@ def execute_project_script(
     if not script_path.is_file():
         raise FileNotFoundError(f"Project script not found: {script_path}")
 
-    cmd = [sys.executable, str(script_path)]
+    if use_kicad_python:
+        from .config import find_kicad_python
+        interpreter = find_kicad_python()
+    else:
+        interpreter = sys.executable
+    cmd = [interpreter, str(script_path)]
     if args:
         cmd.extend(args)
 
@@ -103,12 +113,16 @@ def execute_project_script(
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout_s,
     )
+    noise = "swig/python detected a memory leak"
+    stderr = "\n".join(l for l in proc.stderr.splitlines() if noise not in l)
 
     return {
         "status": "success" if proc.returncode == 0 else "error",
         "exit_code": proc.returncode,
         "stdout": proc.stdout.strip(),
-        "stderr": proc.stderr.strip(),
+        "stderr": stderr.strip(),
         "script": str(script_path),
+        "interpreter": interpreter,
     }

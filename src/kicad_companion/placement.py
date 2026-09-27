@@ -1,202 +1,111 @@
+"""Placement analysis and automation on exact footprint courtyards (via pcbnew).
+
+Footprint origins are frequently pin 1 (every THT part), so geometry is always taken
+from the rendered courtyard polygons, never from the origin.
+"""
+import json
 import math
 import re
+import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from .config import find_kicad_cli, get_render_cache_dir
+from .kicad_python import run_pcbnew
+from .supervisor import guard_headless_write
+
+Rect = Tuple[float, float, float, float]
+
+_READ_JOB = r'''
+board = pcbnew.LoadBoard(ARGS["pcb"])
+fps = []
+for fp in board.GetFootprints():
+    p = fp.GetPosition()
+    fps.append({"ref": fp.GetReference(), "lib": str(fp.GetFPID().GetLibNickname()),
+                "name": str(fp.GetFPID().GetLibItemName()), "x": to_mm(p.x), "y": to_mm(p.y),
+                "rot": fp.GetOrientationDegrees(), "bbox": courtyard_bbox(fp),
+                "back": fp.IsFlipped(), "pads": len(fp.Pads())})
+emit({"outline": board_outline(board), "footprints": fps})
+'''
+
+_MOVE_JOB = r'''
+board = pcbnew.LoadBoard(ARGS["pcb"])
+by_ref = {fp.GetReference(): fp for fp in board.GetFootprints()}
+for ref, (dx, dy) in ARGS["moves"].items():
+    fp = by_ref.get(ref)
+    if fp is not None:
+        fp.Move(pcbnew.VECTOR2I(mm(dx), mm(dy)))
+board.Save(ARGS["pcb"])
+emit({"moved": len(ARGS["moves"])})
+'''
 
 
-def _parse_board_outline(pcb_content: str) -> Tuple[float, float, float, float]:
-    """Extract bounding box (min_x, min_y, max_x, max_y) of Edge.Cuts."""
-    lines = re.findall(
-        r'\(gr_line\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)\s+.*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_content,
-        re.DOTALL,
-    )
-    if not lines:
-        rects = re.findall(
-            r'\(gr_rect\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)\s+.*?\(layer\s+"Edge\.Cuts"\)',
-            pcb_content,
-            re.DOTALL,
-        )
-        if rects:
-            lines = rects
-
-    if not lines:
-        return (0.0, 0.0, 50.0, 70.0)
-
-    xs, ys = [], []
-    for x1, y1, x2, y2 in lines:
-        xs.extend([float(x1), float(x2)])
-        ys.extend([float(y1), float(y2)])
-
-    return (min(xs), min(ys), max(xs), max(ys))
+def _read(pcb: Path) -> Dict[str, Any]:
+    return run_pcbnew(_READ_JOB, {"pcb": str(pcb)})
 
 
-def _parse_footprints(pcb_content: str) -> List[Dict[str, Any]]:
-    """Parse footprints and compute their center, rotation, and bounding boxes."""
-    # Split footprints by paren depth
-    lines = pcb_content.splitlines(keepends=True)
-    fps = []
-    in_fp = False
-    curr = []
-    parens = 0
+def _is_connector(fp: Dict[str, Any]) -> bool:
+    return fp["ref"].upper().startswith(("J", "P", "CN", "X")) or "Connector" in fp["lib"]
 
-    for line in lines:
-        if not in_fp:
-            if line.startswith("\t(footprint "):
-                in_fp = True
-                curr = [line]
-                parens = line.count("(") - line.count(")")
-        else:
-            curr.append(line)
-            parens += line.count("(") - line.count(")")
-            if parens <= 0:
-                in_fp = False
-                fps.append("".join(curr))
 
-    result = []
-    for fp_text in fps:
-        m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not m_ref:
-            continue
-        ref = m_ref.group(1)
+def _is_mechanical(fp: Dict[str, Any]) -> bool:
+    return fp["ref"].upper().startswith(("H", "MH")) or fp["lib"].startswith("MountingHole")
 
-        m_at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', fp_text)
-        if not m_at:
-            continue
-        fx, fy = float(m_at.group(1)), float(m_at.group(2))
-        rot = float(m_at.group(3)) if m_at.group(3) else 0.0
 
-        # Extract courtyard or pad coordinates to get extent
-        pad_pts = []
-        for pm in re.finditer(r'\(pad\s+"[^"]+"\s+\w+\s+\w+\s+\(at\s+([-\d.]+)\s+([-\d.]+).*?\(size\s+([-\d.]+)\s+([-\d.]+)', fp_text):
-            px, py, pw, ph = [float(v) for v in pm.groups()]
-            pad_pts.append((px - pw / 2.0, py - ph / 2.0))
-            pad_pts.append((px + pw / 2.0, py + ph / 2.0))
+def _overlap(a: Rect, b: Rect, gap: float) -> Tuple[float, float]:
+    ox = min(a[2], b[2]) - max(a[0], b[0]) + gap
+    oy = min(a[3], b[3]) - max(a[1], b[1]) + gap
+    return ox, oy
 
-        # Check courtyard lines / rects
-        for crt in re.finditer(r'\(fp_rect\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)\s+.*?\(layer\s+"F\.CrtYd"\)', fp_text, re.DOTALL):
-            cx1, cy1, cx2, cy2 = [float(v) for v in crt.groups()]
-            pad_pts.extend([(cx1, cy1), (cx2, cy2)])
 
-        if pad_pts:
-            min_dx = min(p[0] for p in pad_pts)
-            max_dx = max(p[0] for p in pad_pts)
-            min_dy = min(p[1] for p in pad_pts)
-            max_dy = max(p[1] for p in pad_pts)
-        else:
-            min_dx, max_dx = -1.0, 1.0
-            min_dy, max_dy = -1.0, 1.0
-
-        # Rotate relative bounding box if necessary (approximate AABB)
-        w = max_dx - min_dx
-        h = max_dy - min_dy
-        if abs(rot) in [90.0, 270.0]:
-            w, h = h, w
-
-        half_w = max(w / 2.0, 0.5)
-        half_h = max(h / 2.0, 0.5)
-
-        result.append({
-            "ref": ref,
-            "x": fx,
-            "y": fy,
-            "rot": rot,
-            "half_w": half_w,
-            "half_h": half_h,
-            "bbox": (fx - half_w, fy - half_h, fx + half_w, fy + half_h),
-            "text": fp_text,
-        })
-
-    return result
+def _drc_courtyard_overlaps(pcb: Path) -> Optional[int]:
+    out = get_render_cache_dir() / f"{pcb.stem}_crt_{int(time.time() * 1000)}.json"
+    subprocess.run([find_kicad_cli(), "pcb", "drc", "--format", "json", "--severity-all", "-o", str(out), str(pcb)],
+                   capture_output=True, text=True, check=False)
+    if not out.is_file():
+        return None
+    data = json.loads(out.read_text(encoding="utf-8"))
+    return sum(1 for v in data.get("violations", []) if v.get("type") in ("courtyards_overlap", "npth_inside_courtyard", "pth_inside_courtyard"))
 
 
 def check_placement_overlaps(
     pcb_path: str,
     min_clearance_mm: float = 0.25,
+    connector_edge_inset_mm: float = 2.0,
+    part_edge_inset_mm: float = 0.5,
 ) -> Dict[str, Any]:
-    """Inspect PCB placement for component overlaps, board edge insets, and mounting hole clearances.
-
-    Args:
-        pcb_path: Path to .kicad_pcb file.
-        min_clearance_mm: Minimum clearance required between component boundaries.
-
-    Returns:
-        Structured dictionary with overlap details, edge violations, and overall placement score.
-    """
+    """Courtyard overlaps, board-edge insets and mounting-hole keepouts from exact courtyards."""
     p_path = Path(pcb_path).resolve()
     if not p_path.is_file():
         raise FileNotFoundError(f"PCB file not found: {pcb_path}")
+    data = _read(p_path)
+    fps, outline = data["footprints"], data["outline"]
 
-    content = p_path.read_text(encoding="utf-8")
-    min_bx, min_by, max_bx, max_by = _parse_board_outline(content)
-    fps = _parse_footprints(content)
-
-    overlaps = []
-    edge_violations = []
-    hole_violations = []
-
-    holes = [f for f in fps if f["ref"].startswith("H")]
-
-    for i in range(len(fps)):
-        f1 = fps[i]
-        ref1 = f1["ref"]
-
-        # Check edge clearance: connectors require >= 2.0 mm, components >= 0.5 mm
-        req_margin = 2.0 if ref1.startswith("J") else 0.5
-        b1 = f1["bbox"]
-        if (
-            b1[0] < min_bx + req_margin
-            or b1[2] > max_bx - req_margin
-            or b1[1] < min_by + req_margin
-            or b1[3] > max_by - req_margin
-        ):
-            edge_violations.append({
-                "ref": ref1,
-                "bbox": b1,
-                "required_inset_mm": req_margin,
-            })
-
-        # Check mounting hole clearance (>= 2.5 mm from hole center)
-        if not ref1.startswith("H"):
-            for h in holes:
-                dist = math.hypot(f1["x"] - h["x"], f1["y"] - h["y"])
-                if dist < 2.5 + min(f1["half_w"], f1["half_h"]):
-                    hole_violations.append({
-                        "ref": ref1,
-                        "hole": h["ref"],
-                        "distance_mm": round(dist, 2),
-                        "required_mm": 2.5,
-                    })
-
-        # Check pairwise overlaps
-        for j in range(i + 1, len(fps)):
-            f2 = fps[j]
-            ref2 = f2["ref"]
-            b2 = f2["bbox"]
-
-            # Expand bbox by min_clearance
-            ox = max(0.0, min(b1[2] + min_clearance_mm, b2[2] + min_clearance_mm) - max(b1[0], b2[0]))
-            oy = max(0.0, min(b1[3] + min_clearance_mm, b2[3] + min_clearance_mm) - max(b1[1], b2[1]))
-
+    overlaps, edge_violations, hole_violations = [], [], []
+    for i, a in enumerate(fps):
+        if outline:
+            inset = connector_edge_inset_mm if _is_connector(a) else (0.0 if _is_mechanical(a) else part_edge_inset_mm)
+            b = a["bbox"]
+            worst = min(b[0] - outline[0], b[1] - outline[1], outline[2] - b[2], outline[3] - b[3])
+            if worst < inset - 1e-6:
+                edge_violations.append({"ref": a["ref"], "bbox": b, "inset_mm": round(worst, 3), "required_inset_mm": inset})
+        for b in fps[i + 1:]:
+            if a["back"] != b["back"] and not (_is_mechanical(a) or _is_mechanical(b)):
+                continue  # opposite sides only collide through holes; DRC covers that
+            ox, oy = _overlap(a["bbox"], b["bbox"], min_clearance_mm)
             if ox > 0 and oy > 0:
-                overlap_dist = min(ox, oy)
-                overlaps.append({
-                    "comp1": ref1,
-                    "comp2": ref2,
-                    "overlap_mm": round(overlap_dist, 3),
-                })
+                entry = {"comp1": a["ref"], "comp2": b["ref"], "overlap_mm": round(min(ox, oy), 3)}
+                (hole_violations if (_is_mechanical(a) or _is_mechanical(b)) else overlaps).append(entry)
 
-    score = 100
-    score -= len(overlaps) * 10
-    score -= len(edge_violations) * 15
-    score -= len(hole_violations) * 10
-    score = max(0, score)
-
+    drc_overlaps = _drc_courtyard_overlaps(p_path)
+    score = max(0, 100 - 10 * len(overlaps) - 15 * len(edge_violations) - 10 * len(hole_violations))
     return {
         "status": "success",
         "board": str(p_path),
+        "board_outline_mm": outline,
         "placement_score": score,
-        "is_pass": score == 100,
+        "is_pass": score == 100 and not drc_overlaps,
         "total_components": len(fps),
         "overlap_count": len(overlaps),
         "overlaps": overlaps,
@@ -204,6 +113,8 @@ def check_placement_overlaps(
         "edge_violations": edge_violations,
         "hole_violation_count": len(hole_violations),
         "hole_violations": hole_violations,
+        "drc_courtyard_violations": drc_overlaps,
+        "method": "exact courtyard bounding boxes (pcbnew) + KiCad DRC polygon check",
     }
 
 
@@ -213,261 +124,313 @@ def resolve_placement_overlaps(
     grid_step_mm: float = 0.5,
     fixed_refs: Optional[List[str]] = None,
     max_iterations: int = 50,
+    allow_while_open: bool = False,
 ) -> Dict[str, Any]:
-    """Iteratively separate overlapping footprints using geometric relaxation and grid snapping.
+    """Separate overlapping footprints by minimum-penetration relaxation on exact courtyards.
 
-    Args:
-        pcb_path: Path to .kicad_pcb file.
-        min_clearance_mm: Minimum clearance required between footprints. Default 0.5 mm.
-        grid_step_mm: Grid snap step for resolved positions. Default 0.5 mm.
-        fixed_refs: Optional list of component references that must not move (e.g. connectors, sensors).
-        max_iterations: Relaxation iterations. Default 50.
-
-    Returns:
-        Summary dict of components relocated, iterations executed, and remaining overlaps.
+    Connectors and mounting holes are fixed by default, plus anything in fixed_refs.
+    Movable parts are clamped inside the board outline and their origins snapped to grid.
     """
     p_path = Path(pcb_path).resolve()
-    content = p_path.read_text(encoding="utf-8")
-    min_bx, min_by, max_bx, max_by = _parse_board_outline(content)
-    fps = _parse_footprints(content)
+    guard_headless_write(str(p_path), allow_while_open)
+    data = _read(p_path)
+    fps, outline = data["footprints"], data["outline"]
+    fixed = set(fixed_refs or []) | {f["ref"] for f in fps if _is_connector(f) or _is_mechanical(f)}
 
-    # Determine default fixed components: Connectors, mounting holes, optical sensors
-    fixed_set: Set[str] = set(fixed_refs or [])
-    for f in fps:
-        ref = f["ref"]
-        if (
-            ref.startswith("J")
-            or ref.startswith("H")
-            or ref.startswith("DPD")
-            or ref.startswith("LED")
-        ):
-            fixed_set.add(ref)
+    box = {f["ref"]: list(f["bbox"]) for f in fps}
+    orig = {f["ref"]: (f["x"], f["y"]) for f in fps}
+    shift = {f["ref"]: [0.0, 0.0] for f in fps}
 
-    pos_map = {f["ref"]: [f["x"], f["y"]] for f in fps}
-    orig_pos = {f["ref"]: (f["x"], f["y"]) for f in fps}
+    def move(ref: str, dx: float, dy: float) -> None:
+        b = box[ref]
+        if outline:
+            dx = max(outline[0] + 0.5 - b[0], min(outline[2] - 0.5 - b[2], dx))
+            dy = max(outline[1] + 0.5 - b[1], min(outline[3] - 0.5 - b[3], dy))
+        b[0] += dx; b[2] += dx; b[1] += dy; b[3] += dy
+        shift[ref][0] += dx; shift[ref][1] += dy
 
     iteration = 0
     for iteration in range(max_iterations):
-        moved_any = False
-        for i in range(len(fps)):
-            ref1 = fps[i]["ref"]
-            w1, h1 = fps[i]["half_w"], fps[i]["half_h"]
-            x1, y1 = pos_map[ref1]
-
-            for j in range(i + 1, len(fps)):
-                ref2 = fps[j]["ref"]
-                w2, h2 = fps[j]["half_w"], fps[j]["half_h"]
-                x2, y2 = pos_map[ref2]
-
-                # Check overlap
-                dx = x2 - x1
-                dy = y2 - y1
-                min_dist_x = w1 + w2 + min_clearance_mm
-                min_dist_y = h1 + h2 + min_clearance_mm
-
-                ox = min_dist_x - abs(dx)
-                oy = min_dist_y - abs(dy)
-
-                if ox > 0 and oy > 0:
-                    # Resolve along minimal penetration axis
-                    moved_any = True
-                    is_fixed1 = ref1 in fixed_set
-                    is_fixed2 = ref2 in fixed_set
-
-                    if ox < oy:
-                        # Push in X
-                        sign = 1.0 if dx >= 0 else -1.0
-                        shift = ox
-                        if not is_fixed1 and not is_fixed2:
-                            pos_map[ref1][0] -= (shift / 2.0) * sign
-                            pos_map[ref2][0] += (shift / 2.0) * sign
-                        elif is_fixed1 and not is_fixed2:
-                            pos_map[ref2][0] += shift * sign
-                        elif not is_fixed1 and is_fixed2:
-                            pos_map[ref1][0] -= shift * sign
-                    else:
-                        # Push in Y
-                        sign = 1.0 if dy >= 0 else -1.0
-                        shift = oy
-                        if not is_fixed1 and not is_fixed2:
-                            pos_map[ref1][1] -= (shift / 2.0) * sign
-                            pos_map[ref2][1] += (shift / 2.0) * sign
-                        elif is_fixed1 and not is_fixed2:
-                            pos_map[ref2][1] += shift * sign
-                        elif not is_fixed1 and is_fixed2:
-                            pos_map[ref1][1] -= shift * sign
-
-                    # Clamp movable inside board edges
-                    for r, f_item in [(ref1, fps[i]), (ref2, fps[j])]:
-                        if r not in fixed_set:
-                            hw, hh = f_item["half_w"], f_item["half_h"]
-                            pos_map[r][0] = max(min_bx + hw + 0.5, min(max_bx - hw - 0.5, pos_map[r][0]))
-                            pos_map[r][1] = max(min_by + hh + 0.5, min(max_by - hh - 0.5, pos_map[r][1]))
-
-        if not moved_any:
+        moved = False
+        for i, a in enumerate(fps):
+            for b in fps[i + 1:]:
+                ra, rb = a["ref"], b["ref"]
+                if ra in fixed and rb in fixed:
+                    continue
+                ox, oy = _overlap(box[ra], box[rb], min_clearance_mm)
+                if ox <= 0 or oy <= 0:
+                    continue
+                moved = True
+                ca = ((box[ra][0] + box[ra][2]) / 2, (box[ra][1] + box[ra][3]) / 2)
+                cb = ((box[rb][0] + box[rb][2]) / 2, (box[rb][1] + box[rb][3]) / 2)
+                if ox < oy:
+                    s = 1.0 if cb[0] >= ca[0] else -1.0
+                    d = (ox * s, 0.0)
+                else:
+                    s = 1.0 if cb[1] >= ca[1] else -1.0
+                    d = (0.0, oy * s)
+                if ra not in fixed and rb not in fixed:
+                    move(ra, -d[0] / 2, -d[1] / 2)
+                    move(rb, d[0] / 2, d[1] / 2)
+                elif ra in fixed:
+                    move(rb, *d)
+                else:
+                    move(ra, -d[0], -d[1])
+        if not moved:
             break
 
-    # Snap movable components to grid
-    relocated = {}
-    for f in fps:
-        ref = f["ref"]
-        if ref not in fixed_set:
-            raw_x, raw_y = pos_map[ref]
-            snap_x = round(round(raw_x / grid_step_mm) * grid_step_mm, 2)
-            snap_y = round(round(raw_y / grid_step_mm) * grid_step_mm, 2)
-            pos_map[ref] = [snap_x, snap_y]
+    # Snap origins to grid, choosing the floor/ceil combination that keeps clearance
+    moves, relocated = {}, {}
+    for ref, (dx, dy) in shift.items():
+        if ref in fixed or (abs(dx) < 1e-3 and abs(dy) < 1e-3):
+            continue
+        ox, oy = orig[ref]
+        rx, ry = ox + dx, oy + dy
+        g = grid_step_mm
+        cands = sorted({(round(fx(rx / g) * g, 4), round(fy(ry / g) * g, 4))
+                        for fx in (math.floor, math.ceil, round) for fy in (math.floor, math.ceil, round)},
+                       key=lambda c: abs(c[0] - rx) + abs(c[1] - ry))
+        chosen = cands[0]
+        for nx, ny in cands:
+            b = box[ref]
+            test = (b[0] + nx - rx, b[1] + ny - ry, b[2] + nx - rx, b[3] + ny - ry)
+            if all(not all(v > 0 for v in _overlap(test, box[o], min_clearance_mm)) for o in box if o != ref):
+                chosen = (nx, ny)
+                break
+        nx, ny = chosen
+        b = box[ref]
+        box[ref] = [b[0] + nx - rx, b[1] + ny - ry, b[2] + nx - rx, b[3] + ny - ry]
+        moves[ref] = (nx - ox, ny - oy)
+        relocated[ref] = {"from": (ox, oy), "to": (nx, ny)}
+    if moves:
+        run_pcbnew(_MOVE_JOB, {"pcb": str(p_path), "moves": moves})
 
-        ox, oy = orig_pos[ref]
-        nx, ny = pos_map[ref]
-        if abs(nx - ox) > 0.01 or abs(ny - oy) > 0.01:
-            relocated[ref] = {"from": (ox, oy), "to": (nx, ny)}
-
-    # Apply relocated coordinates to PCB text
-    lines = content.splitlines(keepends=True)
-    out_lines = []
-    in_fp = False
-    fp_lines = []
-    parens = 0
-
-    for line in lines:
-        if not in_fp:
-            if line.startswith("\t(footprint "):
-                in_fp = True
-                fp_lines = [line]
-                parens = line.count("(") - line.count(")")
-            else:
-                out_lines.append(line)
-        else:
-            fp_lines.append(line)
-            parens += line.count("(") - line.count(")")
-            if parens <= 0:
-                in_fp = False
-                fp_text = "".join(fp_lines)
-                m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-                if m_ref and m_ref.group(1) in relocated:
-                    ref = m_ref.group(1)
-                    nx, ny = relocated[ref]["to"]
-                    fp_text = re.sub(
-                        r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)',
-                        lambda m: f'(at {nx} {ny}' + (f' {m.group(3)})' if m.group(3) else ')'),
-                        fp_text,
-                        count=1,
-                    )
-                out_lines.append(fp_text)
-
-    new_content = "".join(out_lines)
-    p_path.write_text(new_content, encoding="utf-8")
-
-    # Re-check remaining overlaps
-    final_check = check_placement_overlaps(str(p_path), min_clearance_mm=min_clearance_mm)
-
+    final = check_placement_overlaps(str(p_path), min_clearance_mm=min(min_clearance_mm, 0.25))
     return {
         "status": "success",
         "board": str(p_path),
         "iterations": iteration + 1,
         "components_relocated_count": len(relocated),
         "relocated": relocated,
-        "remaining_overlaps": final_check["overlap_count"],
-        "placement_score": final_check["placement_score"],
+        "fixed_refs": sorted(fixed),
+        "remaining_overlaps": final["overlap_count"],
+        "placement_score": final["placement_score"],
+        "drc_courtyard_violations": final["drc_courtyard_violations"],
     }
+
+
+# ------------------------------------------------------------------ plan-driven placement
+_PLACE_JOB = r'''
+board = pcbnew.LoadBoard(ARGS["pcb"])
+by_ref = {fp.GetReference(): fp for fp in board.GetFootprints()}
+ol = board_outline(board)
+ox, oy = (ol[0], ol[1]) if (ol and ARGS["relative"]) else (0.0, 0.0)
+gap = ARGS["gap"]
+def place_center(fp, cx, cy, rot):
+    fp.SetOrientationDegrees(rot)
+    b = courtyard_bbox(fp)
+    fp.Move(pcbnew.VECTOR2I(mm(cx - (b[0] + b[2]) / 2), mm(cy - (b[1] + b[3]) / 2)))
+rects, done, overflow, unknown = [], set(), [], []
+for ref, spec in ARGS["fixed"].items():
+    fp = by_ref.get(ref)
+    if fp is None:
+        unknown.append(ref); continue
+    x, y = spec[0] + ox, spec[1] + oy
+    place_center(fp, x, y, spec[2] if len(spec) > 2 else fp.GetOrientationDegrees())
+    rects.append(courtyard_bbox(fp)); done.add(ref)
+for ref, fp in by_ref.items():
+    if ref not in done and ref in ARGS["keep"]:
+        rects.append(courtyard_bbox(fp)); done.add(ref)
+def free(a):
+    return all(a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1] for b in rects)
+def pack(fp, x0, y0, x1, y1, rot, step):
+    fp.SetOrientationDegrees(rot)
+    b = courtyard_bbox(fp)
+    w, h = b[2] - b[0], b[3] - b[1]
+    y = y0
+    while y + h <= y1 + 1e-6:
+        x = x0
+        while x + w <= x1 + 1e-6:
+            if free((x, y, x + w, y + h)):
+                place_center(fp, x + w / 2, y + h / 2, rot)
+                rects.append((x, y, x + w, y + h))
+                return True
+            x += step
+        y += step
+    return False
+for reg in ARGS["regions"]:
+    x0, y0, x1, y1 = [v + (ox if i % 2 == 0 else oy) for i, v in enumerate(reg["rect"])]
+    for ref in reg["refs"]:
+        fp = by_ref.get(ref)
+        if fp is None:
+            unknown.append(ref); continue
+        if ref in done:
+            continue
+        rot = reg.get("rotations", {}).get(ref, reg.get("rotation", 0))
+        (done.add(ref) if pack(fp, x0, y0, x1, y1, rot, ARGS["step"]) else overflow.append(ref))
+if ARGS["auto_rest"] and ol:
+    rest = [fp for r, fp in by_ref.items() if r not in done]
+    rest.sort(key=lambda f: (-(lambda b: (b[2] - b[0]) * (b[3] - b[1]))(courtyard_bbox(f)), f.GetReference()))
+    m = ARGS["margin"]
+    for fp in rest:
+        (done.add(fp.GetReference()) if pack(fp, ol[0] + m, ol[1] + m, ol[2] - m, ol[3] - m,
+                                            fp.GetOrientationDegrees(), ARGS["step"]) else overflow.append(fp.GetReference()))
+board.Save(ARGS["pcb"])
+emit({"placed": len(done), "overflow": overflow, "unknown_refs": unknown,
+      "unplaced": sorted(r for r in by_ref if r not in done)})
+'''
+
+
+def place_footprints(
+    pcb_path: str,
+    fixed: Optional[Dict[str, List[float]]] = None,
+    regions: Optional[List[Dict[str, Any]]] = None,
+    keep_refs: Optional[List[str]] = None,
+    auto_place_rest: bool = True,
+    gap_mm: float = 0.8,
+    step_mm: float = 0.25,
+    margin_mm: float = 1.0,
+    relative_to_outline: bool = True,
+    allow_while_open: bool = False,
+) -> Dict[str, Any]:
+    """Deterministic placement from a plan, using exact courtyards.
+
+    Args:
+        pcb_path: Board to modify.
+        fixed: {ref: [cx, cy, rot]} courtyard-centre positions (mm, board-relative by default).
+        regions: [{"rect": [x0, y0, x1, y1], "refs": [...], "rotation": 0, "rotations": {ref: deg}}];
+            refs are first-fit packed top-left to bottom-right in the given order.
+        keep_refs: Footprints left where they are but treated as obstacles.
+        auto_place_rest: First-fit pack every remaining footprint inside the outline (largest first).
+        gap_mm: Courtyard-to-courtyard gap. step_mm: search grid for packing.
+        margin_mm: Keep-in margin from the outline for auto-placed parts.
+        relative_to_outline: Coordinates are relative to the outline's top-left corner.
+    """
+    p_path = Path(pcb_path).resolve()
+    guard_headless_write(str(p_path), allow_while_open)
+    res = run_pcbnew(_PLACE_JOB, {
+        "pcb": str(p_path), "fixed": fixed or {}, "regions": regions or [], "keep": keep_refs or [],
+        "auto_rest": auto_place_rest, "gap": gap_mm, "step": step_mm, "margin": margin_mm,
+        "relative": relative_to_outline,
+    })
+    check = check_placement_overlaps(str(p_path), min_clearance_mm=min(gap_mm, 0.25))
+    return {"status": "success" if not res["overflow"] else "partial", **res,
+            "placement_score": check["placement_score"], "is_pass": check["is_pass"],
+            "edge_violations": check["edge_violations"], "overlaps": check["overlaps"],
+            "drc_courtyard_violations": check["drc_courtyard_violations"],
+            "hint": "Enlarge regions or the board for overflowing refs." if res["overflow"] else ""}
+
+
+# ------------------------------------------------------------------ silkscreen
+_SILK_JOB = r'''
+board = pcbnew.LoadBoard(ARGS["pcb"])
+modes = ARGS["modes"]
+size, thick = mm(ARGS["size"]), mm(ARGS["thickness"])
+out = {}
+for fp in board.GetFootprints():
+    ref = fp.GetReference()
+    field = fp.Reference()
+    name = str(fp.GetFPID().GetLibItemName())
+    lib = str(fp.GetFPID().GetLibNickname())
+    if ref in ARGS["hide"] or (ARGS["hide_small_smd"] and any(s in name for s in ("0201", "0402", "0603"))):
+        field.SetVisible(False); out[ref] = "hidden"; continue
+    if lib.startswith("MountingHole") or ref.startswith(("H", "MH")):
+        field.SetVisible(False); out[ref] = "hidden"; continue
+    mode = modes.get(ref)
+    if mode is None:
+        mode = "top" if (ref.startswith(("J", "TP", "P")) or "Connector" in lib or "TestPoint" in lib) else "center"
+    if mode == "hidden":
+        field.SetVisible(False); out[ref] = "hidden"; continue
+    field.SetVisible(True)
+    field.SetLayer(pcbnew.B_SilkS if fp.IsFlipped() else pcbnew.F_SilkS)
+    field.SetTextSize(pcbnew.VECTOR2I(size, size))
+    field.SetTextThickness(thick)
+    field.SetTextAngleDegrees(0)
+    field.SetKeepUpright(True)
+    l, t, r, b = courtyard_bbox(fp)
+    cx, cy, h = (l + r) / 2, (t + b) / 2, ARGS["size"]
+    pos = {"center": (cx, cy), "top": (cx, t - h * 0.8), "bottom": (cx, b + h * 0.8),
+           "left": (l - h * 0.6 - len(ref) * h * 0.35, cy), "right": (r + h * 0.6 + len(ref) * h * 0.35, cy)}[mode]
+    field.SetPosition(pcbnew.VECTOR2I(mm(pos[0]), mm(pos[1])))
+    out[ref] = mode
+board.Save(ARGS["pcb"])
+emit(out)
+'''
+
+_SILK_TYPES = ("silk_overlap", "silk_over_copper", "silk_edge_clearance", "text_height", "text_thickness")
+_ORDER = ["center", "top", "bottom", "left", "right", "hidden"]
+
+
+def _silk_offenders(pcb: Path) -> Dict[str, int]:
+    out = get_render_cache_dir() / f"{pcb.stem}_silk_{int(time.time() * 1000)}.json"
+    subprocess.run([find_kicad_cli(), "pcb", "drc", "--format", "json", "--severity-all", "-o", str(out), str(pcb)],
+                   capture_output=True, text=True, check=False)
+    data = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else {}
+    bad: Dict[str, int] = {}
+    for v in data.get("violations", []):
+        if v.get("type") not in _SILK_TYPES:
+            continue
+        for it in v.get("items", []):
+            m = re.match(r"Reference field of (\S+)", it.get("description", ""))
+            if m:
+                bad[m.group(1)] = bad.get(m.group(1), 0) + 1
+    return bad
 
 
 def sanitize_silkscreen(
     pcb_path: str,
     hide_passives: bool = True,
     min_pad_clearance_mm: float = 0.50,
+    text_size_mm: float = 0.8,
+    text_thickness_mm: float = 0.15,
+    hide_refs: Optional[List[str]] = None,
+    max_passes: int = 5,
+    hide_unresolved: bool = True,
+    allow_while_open: bool = False,
 ) -> Dict[str, Any]:
-    """Automatically declutter silkscreen, hide small passives, and ensure minimum clearance.
+    """Arrange reference designators so KiCad DRC reports no silkscreen problems.
+
+    Refs start centred on the part body (connectors/test points above), then any ref that
+    DRC flags (silk overlap, silk over copper, edge clearance, text size) is tried at
+    top/bottom/left/right, and hidden as a last resort (F.Fab keeps it for assembly).
 
     Args:
-        pcb_path: Path to .kicad_pcb file.
-        hide_passives: Set (hide yes) on small 0402/0603/0805 passive reference designators on F.SilkS.
-        min_pad_clearance_mm: Minimum clearance from silkscreen to copper pads.
-
-    Returns:
-        Summary dict of hidden references and cleaned silkscreen elements.
+        pcb_path: Board to modify.
+        hide_passives: Hide refs of tiny SMD passives (0201/0402/0603) outright.
+        min_pad_clearance_mm: Reported only; DRC's own silk clearance rule is authoritative.
+        text_size_mm / text_thickness_mm: Reference text size (DRC minimum is usually 0.8/0.15).
+        hide_refs: References to hide unconditionally.
+        max_passes: DRC/move iterations.
+        hide_unresolved: Hide refs still flagged after max_passes.
     """
     p_path = Path(pcb_path).resolve()
-    content = p_path.read_text(encoding="utf-8")
-
-    hidden_refs = []
-
-    def process_fp(m):
-        fp = m.group(0)
-        m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp)
-        if not m_ref:
-            return fp
-        ref = m_ref.group(1)
-
-        # Small passives heuristic: R*, C*, L*, FB*, or footprint matches 0402/0603/0805
-        is_passive = (
-            ref.startswith("R")
-            or ref.startswith("C")
-            or ref.startswith("L")
-            or ref.startswith("FB")
-            or ref.startswith("ROS_")
-            or ref.startswith("COS_")
-            or ref.startswith("ROUT_")
-        )
-
-        # Do not hide critical ICs or connectors
-        if ref.startswith("U_") or ref.startswith("J_") or ref.startswith("LED") or ref.startswith("DPD"):
-            is_passive = False
-
-        if hide_passives and is_passive:
-            m_ref_prop = re.search(r'\(property\s+"Reference"\s+"[^"]+".*?\n\t\t\)', fp, flags=re.DOTALL)
-            if m_ref_prop and "(hide yes)" not in m_ref_prop.group(0):
-                hidden_refs.append(ref)
-                # Inject (hide yes) into Reference property
-                def add_hide(pm):
-                    p = pm.group(0)
-                    if "(hide yes)" not in p:
-                        last_p = p.rfind(")")
-                        p = p[:last_p] + "\t(hide yes)\n\t\t)"
-                    return p
-                fp = re.sub(r'\(property\s+"Reference"\s+"[^"]+".*?\n\t\t\)', add_hide, fp, count=1, flags=re.DOTALL)
-
-        return fp
-
-    # Process footprints
-    new_content = re.sub(r'\(footprint\s+.*?\n\t\)', process_fp, content, flags=re.DOTALL)
-
-    # Remove duplicate text lines
-    unique_texts = set()
-    deduped_lines = []
-    lines = new_content.splitlines(keepends=True)
-    in_text = False
-    curr_text = []
-    parens = 0
-
-    for line in lines:
-        if not in_text:
-            if line.startswith("\t(gr_text "):
-                in_text = True
-                curr_text = [line]
-                parens = line.count("(") - line.count(")")
-            else:
-                deduped_lines.append(line)
-        else:
-            curr_text.append(line)
-            parens += line.count("(") - line.count(")")
-            if parens <= 0:
-                in_text = False
-                t_str = "".join(curr_text)
-                m_txt = re.search(r'\(gr_text\s+"([^"]+)"\s+\(at\s+([-\d.]+)\s+([-\d.]+)', t_str)
-                if m_txt:
-                    key = (m_txt.group(1), float(m_txt.group(2)), float(m_txt.group(3)))
-                    if key in unique_texts:
-                        continue
-                    unique_texts.add(key)
-                deduped_lines.append(t_str)
-
-    p_path.write_text("".join(deduped_lines), encoding="utf-8")
-
+    guard_headless_write(str(p_path), allow_while_open)
+    modes: Dict[str, str] = {}
+    args = {"pcb": str(p_path), "size": text_size_mm, "thickness": text_thickness_mm,
+            "hide": hide_refs or [], "hide_small_smd": hide_passives}
+    placed = run_pcbnew(_SILK_JOB, {**args, "modes": modes})
+    history = []
+    for _ in range(max_passes):
+        bad = _silk_offenders(p_path)
+        history.append(len(bad))
+        if not bad:
+            break
+        for ref in bad:
+            cur = modes.get(ref, placed.get(ref, "center"))
+            nxt = _ORDER[min(_ORDER.index(cur) + 1, len(_ORDER) - 1)] if cur in _ORDER else "top"
+            if nxt == "hidden" and not hide_unresolved:
+                nxt = cur
+            modes[ref] = nxt
+        placed = run_pcbnew(_SILK_JOB, {**args, "modes": modes})
+    remaining = _silk_offenders(p_path)
+    hidden = sorted(r for r, m in placed.items() if m == "hidden")
     return {
-        "status": "success",
+        "status": "success" if not remaining else "partial",
         "board": str(p_path),
-        "hidden_passive_references_count": len(hidden_refs),
-        "hidden_references": hidden_refs,
+        "hidden_references_count": len(hidden),
+        "hidden_references": hidden,
+        "moved_references": {r: m for r, m in modes.items() if m != "hidden"},
+        "offenders_per_pass": history,
+        "remaining_silk_offenders": remaining,
         "min_pad_clearance_mm": min_pad_clearance_mm,
     }

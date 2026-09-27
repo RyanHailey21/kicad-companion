@@ -46,26 +46,28 @@ def ensure_project_context(
     
     if pcb_files:
         pcb_text = pcb_files[0].read_text(encoding="utf-8", errors="ignore")
-        # Extract layers
-        m_layers = re.search(r'\(layers\s+(\d+)\)', pcb_text)
-        if m_layers:
-            layers = int(m_layers.group(1))
-            
         # Count footprints
         fps = re.findall(r'\(footprint\s+"([^"]+)"', pcb_text)
         components_count = len(fps)
         
-        # Extract nets
-        found_nets = re.findall(r'\(net\s+\d+\s+"([^"]+)"\)', pcb_text)
-        nets = sorted(list(set(found_nets)))
+        # Extract nets: net table (KiCad <= 9) or names on copper items (KiCad 10)
+        found_nets = re.findall(r'\(net\s+(?:\d+\s+)?"([^"]+)"\)', pcb_text)
+        nets = sorted({n for n in found_nets if n and not n.startswith("unconnected-")})
 
-        # Compute board outline bounding box from Edge.Cuts
+        # Copper layer count from the layer table
+        m_layer_tbl = re.search(r'\(layers\s*\n(.*?)\n\t\)', pcb_text, re.DOTALL)
+        if m_layer_tbl:
+            layers = len(re.findall(r'"[^"]*\.Cu"\s+(?:signal|power|mixed|jumper)', m_layer_tbl.group(1))) or layers
+
+        # Board outline: every Edge.Cuts primitive (lines, rects, arcs, polys, circles);
+        # the match may not run on into the next graphic item.
         edge_pts = []
-        for m in re.finditer(r'\(fp_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)', pcb_text, re.DOTALL):
-            edge_pts.extend([(float(m.group(1)), float(m.group(2))), (float(m.group(3)), float(m.group(4)))])
-        for m in re.finditer(r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)', pcb_text, re.DOTALL):
-            edge_pts.extend([(float(m.group(1)), float(m.group(2))), (float(m.group(3)), float(m.group(4)))])
-            
+        edge_re = r'\((?:gr|fp)_(?:line|rect|arc|poly|circle|curve)\b((?:(?!\((?:gr|fp)_|\(footprint\b).)*?)\(layer\s+"Edge\.Cuts"\)'
+        for m in re.finditer(edge_re, pcb_text, re.DOTALL):
+            body = m.group(1)
+            for x, y in re.findall(r'\((?:start|end|mid|center|xy)\s+([-\d.]+)\s+([-\d.]+)\)', body):
+                edge_pts.append((float(x), float(y)))
+
         if edge_pts:
             xs = [p[0] for p in edge_pts]
             ys = [p[1] for p in edge_pts]
@@ -85,7 +87,7 @@ def ensure_project_context(
             if m_ref and m_val:
                 ref = m_ref.group(1)
                 val = m_val.group(1)
-                if any(ref.upper().startswith(p) for p in ["U", "Q", "DPD", "LED", "D"]) and ref not in seen_refs:
+                if any(ref.upper().startswith(p) for p in ["U", "Q", "LED", "D", "IC"]) and ref not in seen_refs:
                     seen_refs.add(ref)
                     active_ics.append((ref, val))
     elif pcb_files:
@@ -97,7 +99,7 @@ def ensure_project_context(
             if m_ref and m_val:
                 ref = m_ref.group(1)
                 val = m_val.group(1)
-                if any(ref.upper().startswith(p) for p in ["U", "Q", "DPD", "LED", "D"]) and ref not in seen_refs:
+                if any(ref.upper().startswith(p) for p in ["U", "Q", "LED", "D", "IC"]) and ref not in seen_refs:
                     seen_refs.add(ref)
                     active_ics.append((ref, val))
 
@@ -105,11 +107,27 @@ def ensure_project_context(
     spice_models = list(root.glob("simulation/**/*.lib")) + list(root.glob("simulation/**/*.sub")) + list(root.glob("simulation/**/*.mod"))
     model_names = [m.name for m in spice_models]
 
-    power_rails = [n for n in nets if any(p in n.upper() for p in ["3V3", "5V", "12V", "VCC", "VDD", "VREF", "GND"])]
+    power_rails = sorted({n.rsplit("/", 1)[-1] for n in nets
+                          if re.match(r"^(?:[AD]?GND\w*|V(?:CC|DD|SS|BAT|BUS|IN|REF)\w*|\+?\d+V\d*\w*|\d+V\d+\w*)$",
+                                      n.rsplit("/", 1)[-1], re.I)})
 
     # If file exists, check if user provided updates, otherwise generate template
     is_new = not context_file.is_file()
-    if is_new or purpose or title:
+    if not is_new:
+        text = context_file.read_text(encoding="utf-8")
+        repl = {
+            r"(- \*\*Board Outline:\*\* ).*": dimensions,
+            r"(- \*\*Copper Layers:\*\* ).*": str(layers),
+            r"(- \*\*Component Count:\*\* ).*": f"{components_count} footprints placed",
+        }
+        if title:
+            repl[r"(- \*\*Project Name:\*\* ).*"] = title
+        if purpose:
+            repl[r"(- \*\*Primary Goal:\*\* ).*"] = purpose
+        for pat, val in repl.items():
+            text = re.sub(pat, lambda m, v=val: m.group(1) + v, text)
+        context_file.write_text(text, encoding="utf-8")
+    else:
         existing_text = context_file.read_text(encoding="utf-8") if context_file.is_file() else ""
         
         proj_title = title or project_stem.replace("-", " ").replace("_", " ").title()
@@ -186,11 +204,11 @@ def ensure_project_context(
   - Silkscreen Pad Clearance: $\\ge 0.50\\text{{ mm}}$ from all exposed copper pads
 
 ## 5. Mandatory Verification Gates
-- [x] SPICE simulation with true Berkeley NGSPICE solver executed
-- [x] Physical pinout and polarity audited against manufacturer datasheets
-- [x] 100/100 Courtyard placement score with zero edge overhangs
-- [x] KiCad DRC passed with 0 errors and 0 unconnected nets
-- [x] Production Gerbers, drill files, BOM, CPL, and 3D STEP exported
+- [ ] SPICE simulation with true Berkeley NGSPICE solver executed
+- [ ] Physical pinout and polarity audited against manufacturer datasheets
+- [ ] 100/100 Courtyard placement score with zero edge overhangs
+- [ ] KiCad DRC passed with 0 errors and 0 unconnected nets
+- [ ] Production Gerbers, drill files, BOM, CPL, and 3D STEP exported
 """
         context_file.write_text(content, encoding="utf-8")
 

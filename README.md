@@ -8,6 +8,13 @@ Compatible with **Antigravity**, **Claude (Desktop & Code)**, and **OpenAI Codex
 
 ## Capabilities
 
+0. **Headless Design Pipeline (`generate_schematic`, `build_pcb_from_schematic`, `place_footprints`, `configure_netclasses`, `finalize_pcb`)**:
+   - Builds a complete schematic from a JSON parts/nets spec (official-library symbols, all units, automatic PWR_FLAGs, ERC summary); symbol UUIDs stay stable across regenerations.
+   - Creates a placed, schematic-linked PCB without the GUI: footprints from stock and fp-lib-table libraries, exact KiCad net names, outline, plan-driven placement on exact courtyards.
+   - Net classes that match KiCad's sheet-prefixed net names (`/GND`), merged non-destructively.
+   - Post-route finishing: re-link to the schematic, GND pours on both layers, zone fill.
+   - All board edits go through KiCad's own `pcbnew` Python, and every writing tool refuses to run while KiCad has the project open (KiCad would overwrite the changes on exit; see `check_project_open`).
+
 1. **Project Intent Governance (`ensure_project_context`)**:
    - Parses `.kicad_pcb` and `.kicad_sch` to establish and maintain a persistent `PROJECT_CONTEXT.md` at the root of the PCB directory.
    - Constrains AI agents to clear intent, physical constraints, layer counts, power rails, SPICE model tracking, and pre-fab checklist verification.
@@ -21,16 +28,16 @@ Compatible with **Antigravity**, **Claude (Desktop & Code)**, and **OpenAI Codex
 4. **One-Shot Manufacturing Package Pipeline (`build_production_package`)**:
    - Consolidates 10+ granular tool calls into 1 atomic operation: DRC pre-flight -> Protel Gerbers & drill generation -> zip packaging -> CPL centroid `.csv` export -> 3D STEP model -> 2D PCB & schematic documentation SVGs.
 5. **Headless Visual Renders (`render_pcb_3d`, `render_pcb_2d`, `render_schematic`)**:
-   - Generates high-resolution 3D board renders (top, bottom, isometric) via `kicad-cli pcb render`.
-   - Generates 2D vector layer plots (F.Cu, B.Cu, Silkscreen, Edge.Cuts) via `kicad-cli pcb export svg`.
-   - Generates vector schematic sheet renders via `kicad-cli sch export svg`.
-6. **Intelligent DRC/ERC Triage (`triage_pcb_drc`)**:
-   - Runs `kicad-cli pcb drc --format json` headlessly.
-   - Categorizes violations into **Critical Blockers** (shorts, open tracks), **Fab Hazards** (clearance, annular ring), and **Cosmetic Warnings** with exact mm coordinates and suggested fixes.
-7. **Automated Placement & Silkscreen Sanitizer (`check_placement_overlaps`, `resolve_placement_overlaps`, `sanitize_silkscreen`)**:
-   - Evaluates bounding-box and courtyard clearances between components and board outlines.
-   - Automatically clusters related passives around ICs and resolves spatial collisions to achieve 100/100 placement scores.
-   - Moves silkscreen designators outside pads and components with standardized offsets.
+   - Generates 3D board renders (top, bottom, isometric) via `kicad-cli pcb render` and returns the image inline.
+   - Generates 2D layer plots (F.Cu, B.Cu, Silkscreen, Edge.Cuts) as SVG or PDF.
+   - Generates schematic renders as SVG or PDF (PDF can be read visually by agents).
+6. **Intelligent DRC/ERC Triage (`triage_pcb_drc`, `run_erc`)**:
+   - Runs `kicad-cli pcb drc --format json` headlessly, optionally with zone refill and schematic-parity checking.
+   - Categorizes violations into **Critical Blockers** (shorts, open tracks), **Fab Hazards** (clearance, annular ring), and **Cosmetic Warnings** with exact mm coordinates and suggested fixes; flags footprint-internal pad spacing that no reroute can fix.
+7. **Automated Placement & Silkscreen Sanitizer (`check_placement_overlaps`, `resolve_placement_overlaps`, `place_footprints`, `sanitize_silkscreen`)**:
+   - Uses exact courtyard geometry from pcbnew (footprint origins are often pin 1) and cross-checks with KiCad DRC.
+   - Resolves collisions by relaxation on real courtyards, with a clearance-preserving grid snap.
+   - Arranges reference designators with a DRC feedback loop until no silkscreen violations remain.
 8. **Autonomous Routing Pipeline (`export_specctra_dsn`, `autoroute_board`, `import_specctra_ses`, `sync_pcb_nets`)**:
    - Headlessly synchronizes schematic netlists and netclasses directly into `.kicad_pcb` files.
    - Translates KiCad boards into Specctra DSN format with netclass routing constraints and keepouts.
@@ -45,7 +52,7 @@ Compatible with **Antigravity**, **Claude (Desktop & Code)**, and **OpenAI Codex
 ## Setup Across Computers
 
 ### 1. Prerequisites (Host Machine)
-1. **KiCad 8+**: Ensure `kicad-cli` is installed and added to your system `PATH`.
+1. **KiCad 8+**: Standard install locations are found automatically. Override with environment variables if needed: `KICAD_BIN_DIR` (kicad-cli / KiCad Python), `KICAD_PYTHON`, `KICAD_SHARE_DIR`, `FREEROUTING_JAR`.
    - Windows: typically `C:\Program Files\KiCad\8.0\bin` or `C:\Program Files\KiCad\9.0\bin`
    - Linux: `sudo apt install kicad`
    - macOS: `/Applications/KiCad/KiCad.app/Contents/MacOS`

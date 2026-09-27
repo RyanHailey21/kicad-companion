@@ -78,8 +78,14 @@ def render_pcb_2d(
     pcb_path: str,
     layers: str = "F.Cu,B.Cu,F.Silkscreen,Edge.Cuts",
     theme: Optional[str] = None,
+    fmt: str = "svg",
 ) -> Dict[str, Any]:
-    """Export a 2D composite SVG of the selected PCB layers."""
+    """Export a 2D composite plot of the selected PCB layers as SVG or PDF.
+
+    PDF is directly viewable by agents that can read PDFs (e.g. Claude's Read tool).
+    """
+    if fmt not in ("svg", "pdf"):
+        raise ValueError("fmt must be 'svg' or 'pdf'")
     kicad_cli = find_kicad_cli()
     p_path = Path(pcb_path).resolve()
     if not p_path.is_file():
@@ -87,21 +93,12 @@ def render_pcb_2d(
 
     cache_dir = get_render_cache_dir()
     timestamp = int(time.time() * 1000)
-    out_file = cache_dir / f"{p_path.stem}_2d_{timestamp}.svg"
+    out_file = cache_dir / f"{p_path.stem}_2d_{timestamp}.{fmt}"
 
-    cmd = [
-        kicad_cli,
-        "pcb",
-        "export",
-        "svg",
-        "--mode-single",
-        "--layers",
-        layers,
-        "--fit-page-to-board",
-        "--exclude-drawing-sheet",
-        "-o",
-        str(out_file),
-    ]
+    cmd = [kicad_cli, "pcb", "export", fmt, "--mode-single", "--layers", layers]
+    if fmt == "svg":
+        cmd += ["--fit-page-to-board", "--exclude-drawing-sheet"]
+    cmd += ["-o", str(out_file)]
 
     if theme:
         cmd.extend(["--theme", theme])
@@ -122,7 +119,7 @@ def render_pcb_2d(
     return {
         "status": "success",
         "file_path": str(out_file),
-        "format": "svg",
+        "format": fmt,
         "layers": layers,
         "size_bytes": out_file.stat().st_size,
     }
@@ -131,8 +128,11 @@ def render_pcb_2d(
 def render_schematic(
     sch_path: str,
     page: Optional[int] = None,
+    fmt: str = "svg",
 ) -> Dict[str, Any]:
-    """Export a schematic sheet to SVG."""
+    """Export schematic sheets to SVG (one file per sheet) or a single PDF."""
+    if fmt not in ("svg", "pdf"):
+        raise ValueError("fmt must be 'svg' or 'pdf'")
     kicad_cli = find_kicad_cli()
     s_path = Path(sch_path).resolve()
     if not s_path.is_file():
@@ -143,15 +143,11 @@ def render_schematic(
     out_dir = cache_dir / f"{s_path.stem}_sch_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        kicad_cli,
-        "sch",
-        "export",
-        "svg",
-        "--exclude-drawing-sheet",
-        "-o",
-        str(out_dir),
-    ]
+    if fmt == "pdf":
+        target = out_dir / f"{s_path.stem}.pdf"
+        cmd = [kicad_cli, "sch", "export", "pdf", "-o", str(target)]
+    else:
+        cmd = [kicad_cli, "sch", "export", "svg", "--exclude-drawing-sheet", "-o", str(out_dir)]
 
     if page is not None:
         cmd.extend(["--pages", str(page)])
@@ -169,13 +165,15 @@ def render_schematic(
         err_msg = proc.stderr.strip() or proc.stdout.strip() or "Unknown schematic export error"
         raise RuntimeError(f"Schematic render failed (exit code {proc.returncode}): {err_msg}")
 
-    svg_files = list(out_dir.glob("*.svg"))
-    if not svg_files:
-        raise RuntimeError("No SVG files were produced by schematic export.")
+    files = sorted(out_dir.glob(f"*.{fmt}"))
+    if not files:
+        raise RuntimeError(f"No {fmt.upper()} files were produced by schematic export.")
 
     return {
         "status": "success",
+        "format": fmt,
         "directory": str(out_dir),
-        "svg_files": [str(f) for f in svg_files],
-        "primary_file": str(svg_files[0]),
+        "files": [str(f) for f in files],
+        "svg_files": [str(f) for f in files] if fmt == "svg" else [],
+        "primary_file": str(files[0]),
     }

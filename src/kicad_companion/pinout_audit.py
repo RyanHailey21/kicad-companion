@@ -65,6 +65,13 @@ def audit_component_pinouts(
         }
 
 
+    lib_by_ref_early: Dict[str, str] = {}
+    values_by_ref: Dict[str, str] = {}
+    if has_sch:
+        for m in re.finditer(r'\(symbol\s+\(lib_id\s+"([^"]+)".*?\(property\s+"Reference"\s+"([^"]+)".*?\(property\s+"Value"\s+"([^"]*)"', sch_text, re.DOTALL):
+            lib_by_ref_early[m.group(2)] = m.group(1)
+            values_by_ref[m.group(2)] = m.group(3)
+
     # 2. Check LED Polarity
     for ref, data in pcb_footprints.items():
         if ref.upper().startswith("LED") or "LED" in data["type"]:
@@ -91,20 +98,29 @@ def audit_component_pinouts(
                     "severity": "CRITICAL",
                 })
 
-    # 3. Check SOT-23 MOSFET Pinouts (Q1, AO3400A)
+    # 3. MOSFET pinouts. Only parts that are actually MOSFETs: bipolar transistors
+    # (e.g. PN2222A: 1=E to GND) are legitimate with pad 1 on ground.
+    mosfet_hint = re.compile(r"MOSFET|NMOS|PMOS|Q_[NP]MOS|AO34|AO33|2N7002|BSS1[38]|IRLM|SI23|DMG|FDN3|NTR", re.I)
     for ref, data in pcb_footprints.items():
-        if ref.upper().startswith("Q"):
-            pad1 = data["pads"].get("1", {}).get("net", "")
-            pad2 = data["pads"].get("2", {}).get("net", "")
-            pad3 = data["pads"].get("3", {}).get("net", "")
-            # Standard N-MOSFET (AO3400A): Pin 1=Gate, Pin 2=Source (GND), Pin 3=Drain
-            if pad2 and "GND" not in pad2.upper() and ("GND" in pad1.upper() or "GND" in pad3.upper()):
-                polarity_warnings.append({
-                    "reference": ref,
-                    "issue": "Suspect MOSFET Pin Mapping",
-                    "details": f"In SOT-23 N-MOSFET (e.g. AO3400A), Pin 2 is Source (normally GND). Found: Pin 1='{pad1}', Pin 2='{pad2}', Pin 3='{pad3}'.",
-                    "severity": "WARNING",
-                })
+        if not ref.upper().startswith("Q"):
+            continue
+        sym_lib = lib_by_ref_early.get(ref, "")
+        value = values_by_ref.get(ref, "")
+        if not (mosfet_hint.search(sym_lib) or mosfet_hint.search(value)):
+            continue
+        if "SOT-23" not in data["type"] and "SOT23" not in data["type"]:
+            continue
+        pad1 = data["pads"].get("1", {}).get("net", "")
+        pad2 = data["pads"].get("2", {}).get("net", "")
+        pad3 = data["pads"].get("3", {}).get("net", "")
+        # Common SOT-23 N-MOSFET (AO3400A, 2N7002): 1=Gate, 2=Source (normally GND), 3=Drain
+        if pad2 and "GND" not in pad2.upper() and ("GND" in pad1.upper() or "GND" in pad3.upper()):
+            polarity_warnings.append({
+                "reference": ref,
+                "issue": "Suspect MOSFET Pin Mapping",
+                "details": f"{value}: in most SOT-23 N-MOSFETs pin 2 is Source (normally GND). Found: Pin 1='{pad1}', Pin 2='{pad2}', Pin 3='{pad3}'. Verify against the datasheet.",
+                "severity": "WARNING",
+            })
 
     # 4. Check Annotation Syntax (Trailing Digits)
     for ref in pcb_footprints.keys():
@@ -149,6 +165,21 @@ def audit_component_pinouts(
             lib_by_ref[r] = lid
             inst_units_by_ref.setdefault(r, set()).add(u)
 
+    # Pins the schematic leaves unconnected on purpose (no-connect flag / NC pin)
+    intended_nc = set()
+    symbol_pins_by_ref: Dict[str, set] = {}
+    if has_sch:
+        try:
+            from .kicad_python import export_netlist
+            nl = export_netlist(s_path)
+            for name, nodes in nl["nets"].items():
+                if name.startswith("unconnected-"):
+                    intended_nc.update((n["ref"], n["pin"]) for n in nodes)
+            symbol_pins_by_ref = {r: set(c["pins"]) for r, c in nl["components"].items()}
+        except Exception:
+            pass
+    unmapped_pads = []
+
     # 5. Check Floating / Unconnected Pads on PCB (respecting schematic NC pins)
     for ref, data in pcb_footprints.items():
         if any(ref.upper().startswith(p) for p in ["H", "TP", "FID", "LOGO", "REF", "G"]):
@@ -158,8 +189,15 @@ def audit_component_pinouts(
         if lid and lid in nc_pins_by_ref:
             known_ncs = nc_pins_by_ref[lid]
         for pnum, pinfo in data["pads"].items():
-            if not pinfo["net"]:
-                if pnum in known_ncs:
+            net = pinfo["net"]
+            if net.startswith("unconnected-") or (ref, pnum) in intended_nc:
+                continue  # schematic marks this pin as deliberately unused
+            if not net:
+                if pnum in known_ncs or pnum == "":
+                    continue
+                if ref in symbol_pins_by_ref and pnum not in symbol_pins_by_ref[ref]:
+                    # footprint pad with no symbol pin (e.g. TO-92 NC lead): nothing to connect
+                    unmapped_pads.append({"reference": ref, "pad": pnum})
                     continue
                 floating_pads.append({"reference": ref, "pad": pnum})
 
@@ -186,6 +224,7 @@ def audit_component_pinouts(
         "floating_pads": floating_pads[:20],
         "total_floating_pads": len(floating_pads),
         "missing_ic_units": missing_units,
+        "pads_without_symbol_pin": unmapped_pads,
         "verdict": (
             "PASSED: Pinout and polarity verified clean."
             if not polarity_warnings and len(floating_pads) == 0
